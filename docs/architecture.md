@@ -8,11 +8,12 @@ architecture *names*, CLI flags, checkpoint tags, or tokenizers. It has zero imp
 (plus `torch`, and an optional `kernels` dependency for the FA3 kernel path) — see
 `tests/test_standalone.py` for the mechanical proof.
 
-In this repo, `nanochat/architectures/` is the layer that turns a `--depth` dial or an old
-checkpoint into a tree for `modelcore` to build, and `nanochat/checkpoint_manager.py`/
-`nanochat/engine.py` are the layer that adapts checkpoint naming/tokenizers/tool-use onto
-`ModelManager`. See the repo root's `docs/architecture.md` for that side of the contract; this
-document only covers `modelcore` itself.
+In its host application, [8kb/nanochat](https://github.com/8kb/nanochat), `nanochat/architectures/`
+is the layer that turns a `--depth` dial or an old checkpoint into a tree for `modelcore` to build,
+and `nanochat/checkpoint_manager.py`/`nanochat/engine.py` are the layer that adapts checkpoint
+naming/tokenizers/tool-use onto `ModelManager`. See
+[nanochat's docs/architecture.md](https://github.com/8kb/nanochat/blob/master/docs/architecture.md)
+for that side of the contract; this document only covers `modelcore` itself.
 
 ```
 modelcore/
@@ -34,7 +35,7 @@ modelcore/
 ├── optim/                  MuonAdamW
 ├── kernels/                FA3/SDPA flash-attention interface
 ├── cache.py                KVCache
-└── tests/                  modelcore's own test suite + goldens (see "Verifying" below)
+└── tests/                  modelcore's own test suite (see "Verifying" below)
 ```
 
 ## `ModelManager`: the one entrypoint
@@ -286,7 +287,7 @@ touches the key(s) it owns.
 A store is deliberately narrow and duck-typed (not an ABC) — `ArtifactStore` is a protocol, not a
 base class a caller is required to subclass. This is the seam a host application uses to adapt an
 old, pre-`modelcore` format onto `ModelManager` without core ever learning that old formats exist:
-in this repo, `nanochat.checkpoint_manager.LegacyCheckpointStore(FileSystemStore)` overrides
+in nanochat, `nanochat.checkpoint_manager.LegacyCheckpointStore(FileSystemStore)` overrides
 `read_config`/`read_model_state` to run a legacy checkpoint through `nanochat.architectures.legacy`
 on first read, memoized, before handing bytes to `ModelManager.load_model` — `modelcore` itself
 never has a legacy code path.
@@ -298,8 +299,8 @@ config: `compute_dtype` and a log sink. A component that needs it declares `need
 same mechanism as `rope` or `n_embd`. `detect_compute_dtype()` reads `MODELCORE_DTYPE` from the
 environment (CUDA capability, else fp32, as a fallback); a host application's own
 `COMPUTE_DTYPE`-shaped global should source its value from `modelcore.runtime.DEFAULT_RUNTIME`
-rather than the other way around, since `modelcore` has zero dependencies on its host (in this
-repo, `nanochat.common.COMPUTE_DTYPE`/`COMPUTE_DTYPE_REASON` do exactly this, and also accept
+rather than the other way around, since `modelcore` has zero dependencies on its host (in nanochat,
+`nanochat.common.COMPUTE_DTYPE`/`COMPUTE_DTYPE_REASON` do exactly this, and also accept
 `NANOCHAT_DTYPE` as a back-compat alias for `MODELCORE_DTYPE`).
 
 ## Adding a component, step by step
@@ -316,7 +317,7 @@ repo, `nanochat.common.COMPUTE_DTYPE`/`COMPUTE_DTYPE_REASON` do exactly this, an
    decorator runs.
 5. If it needs testing at the tree level rather than in isolation, add a flavor to
    `modelcore/tests/conftest.py`'s `FLAVORS` dict. If it should be reachable from the host
-   application's own depth-dial CLI, add it there too (in this repo, that's
+   application's own depth-dial CLI, add it there too (in nanochat, that's
    `nanochat/architectures/presets.py`).
 
 ## Cross-layer KV sharing
@@ -411,7 +412,7 @@ modules. Both are safe to call at any point in a model's lifecycle — an optimi
   `ModelManager.new_decoder(model, tokens, *, num_samples=1, max_tokens=None, device=None)`.
 
 None of this knows about tokenizers, special tokens, or tool use — a host application layers those
-concerns on top, driving `Decoder` for the actual model-stepping (in this repo,
+concerns on top, driving `Decoder` for the actual model-stepping (in nanochat,
 `nanochat.engine.Engine` adds the chat-token/calculator state machine around exactly this).
 
 ## The meta-device footgun
@@ -430,9 +431,9 @@ names. One consequence: the exact sequence of RNG calls during a from-scratch `i
 not guaranteed stable across a refactor of shared code (same individual `torch.nn.init.*` calls,
 potentially different order) — this does not affect *loading* an existing checkpoint (its saved
 values fully override whatever `init_weights()` produced), only bit-for-bit reproducibility of a
-brand-new from-scratch run at a given seed. This is why `modelcore/tests/goldens/tiny/*`'s
-regression proof loads real saved weights into a freshly-built model rather than comparing two
-independently-seeded `init_weights()` calls.
+brand-new from-scratch run at a given seed. This is why the host application's own regression
+goldens (nanochat's `tests/goldens/tiny/*`) load real saved weights into a freshly-built model
+rather than comparing two independently-seeded `init_weights()` calls.
 
 ## Precision
 
@@ -444,35 +445,47 @@ for, and the same marker `modelcore.precision.fp8` swaps in place of.
 
 ## Verifying a change is behavior-preserving
 
-`modelcore/tests/goldens/*.json` (the `tiny_composed_*` set) record — for a seeded synthetic model
-of every preset flavor — the state-dict fingerprint, every accounting number, and a forward-logits
-hash, captured once and never expected to change. `modelcore/tests/test_manager.py`'s
-`test_matches_pre_refactor_composed_golden` replays them.
+`modelcore`'s own net is its parametrized suite (`modelcore/tests/test_manager.py`, run over every
+flavor in `conftest.py`'s `FLAVORS` dict): validation, forward/backward finiteness, param-role
+partitioning, optimizer-group partitioning, layer-spec/KV-cache-spec consistency, seed
+reproducibility, and save/load round trips. There is no golden-fixture suite inside this repo —
+this package's own tests establish correctness of a *new* build from scratch, not bit-for-bit
+equivalence with some prior version.
 
 ```bash
 python -m pytest modelcore/tests -v
 ```
 
-runs the whole standalone suite, including `test_standalone.py` (an AST scan asserting zero
-imports from a host application anywhere under `modelcore/`) and `test_precision.py`/
-`test_generate.py` (fp8 role/accounting correctness, and `Decoder` vs `generate_naive` agreement).
-The real proof of standalone-ness, occasionally worth re-running by hand:
+runs the whole suite, including `test_standalone.py` (an AST scan asserting zero imports from a
+host application anywhere under `modelcore/`) and `test_precision.py`/`test_generate.py` (fp8
+role/accounting correctness, and `Decoder` vs `generate_naive` agreement). The real proof of
+standalone-ness, occasionally worth re-running by hand from this repo's root:
 
 ```bash
 cp -r modelcore /tmp/modelcore-check && cd /tmp/modelcore-check/.. \
   && PYTHONPATH=$(pwd) python -m pytest modelcore-check/tests -q
 ```
 
-(rename the copy's parent-relative import to match, or simpler: copy to `<somewhere>/modelcore`
-and run with that directory's parent on `PYTHONPATH`) — must pass with no host application on the
-path at all.
+(copy the top-level `modelcore` directory — the one containing both the `modelcore/` package and
+its `tests/` — to `<somewhere>/modelcore` and run with that directory's parent on `PYTHONPATH`) —
+must pass with no host application on the path at all.
 
-A brand-new component or composer has no golden to diff against; verify it directly instead —
+A brand-new component or composer has no fixture to diff against; verify it directly instead —
 `manager.validate_config(config).ok`, `manager.create_optimizer(model)`'s groups partition
 `model.parameters()` exactly (see `modelcore/tests/test_manager.py`'s generic suite, parametrized
 over every flavor), and a forward/backward pass produces finite output and populates every
 gradient.
 
-For a change to a host application's own layer on top of `modelcore` (in this repo,
-`nanochat/architectures/`, `nanochat/checkpoint_manager.py`, `nanochat/engine.py`), see the repo
-root's `docs/architecture.md`.
+**Behavior preservation for a host application's use of `modelcore` is that host's own concern, not
+this repo's.** nanochat is the worked example: its `tests/goldens/*.json` (including the four
+`tiny_composed_*` presets — modelcore's own pre-Stage-7 baseline, moved here at Stage 8 then back
+to nanochat at Stage 10 once modelcore became its own repo, see the `llmllab` family repo's
+`docs/subsystem-conventions.md#where-a-golden-belongs`, currently local-only alongside this repo)
+record real accounting numbers, generation, and forward logits against known checkpoints, replayed
+by `tests/test_goldens.py`/`tests/test_architectures.py`. A change here that a host depends on
+should be checked against that host's own suite too — for nanochat, after
+`uv pip install -e ../modelcore` from its venv — before considering the change complete; passing
+modelcore's own suite is necessary but not proof the host is unaffected. See
+[nanochat's docs/architecture.md](https://github.com/8kb/nanochat/blob/master/docs/architecture.md#verifying-a-change-is-behavior-preserving)
+for that side, including how a host layer (`nanochat/architectures/`, `nanochat/checkpoint_manager.py`,
+`nanochat/engine.py`) verifies its own changes.
