@@ -14,6 +14,7 @@ from modelcore.cache import KVCache
 from modelcore.config.spec import ModelConfig
 from modelcore.config.validate import validate_config as _validate_config
 from modelcore.errors import ValidationReport
+from modelcore.evaluate import evaluate_bpb as _evaluate_bpb
 from modelcore.generate import Decoder
 from modelcore.model import Model
 from modelcore.optim import MuonAdamW
@@ -179,6 +180,17 @@ class ModelManager:
         see modelcore.generate.Decoder. The generic (tokenizer-agnostic) half of a cached
         autoregressive generation loop."""
         return Decoder(model, self, tokens, num_samples=num_samples, max_tokens=max_tokens, device=device)
+
+    # -- evaluate --
+
+    def evaluate_bpb(self, model: Model, batches, steps: int, token_bytes, *, bos_token_id=None,
+                      doc_masking_max_docs_per_row: int | None = None, padding_id: int | None = None) -> float:
+        """Bits-per-byte over `steps` batches -- see modelcore.evaluate.evaluate_bpb for the full
+        contract (in particular what token_bytes must be and why doc masking is optional)."""
+        return _evaluate_bpb(
+            model, batches, steps, token_bytes, bos_token_id=bos_token_id,
+            doc_masking_max_docs_per_row=doc_masking_max_docs_per_row, padding_id=padding_id,
+        )
 
     # -- precision --
 

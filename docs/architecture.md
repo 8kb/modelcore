@@ -65,6 +65,10 @@ class ModelManager:
     def new_kv_cache(self, model, *, batch_size, seq_len, device=None) -> KVCache
     def new_decoder(self, model, tokens, *, num_samples=1, max_tokens=None, device=None) -> Decoder
 
+    # evaluate
+    def evaluate_bpb(self, model, batches, steps, token_bytes, *, bos_token_id=None,
+                      doc_masking_max_docs_per_row=None, padding_id=None) -> float
+
     # precision
     def enable_fp8(self, model, *, recipe="tensorwise", align=16, min_dim=128) -> Fp8Report
     def fp8_disabled(self, model)   # context manager; no-op if model has no fp8 modules
@@ -414,6 +418,29 @@ modules. Both are safe to call at any point in a model's lifecycle — an optimi
 None of this knows about tokenizers, special tokens, or tool use — a host application layers those
 concerns on top, driving `Decoder` for the actual model-stepping (in nanochat,
 `nanochat.engine.Engine` adds the chat-token/calculator state machine around exactly this).
+
+## Bits-per-byte evaluation
+
+`modelcore/evaluate.py`'s `evaluate_bpb` (public seam: `ModelManager.evaluate_bpb`) reports loss as
+bits-per-byte rather than the usual mean loss — a vocab-size-independent metric, so a checkpoint
+trained against a different tokenizer's vocab is still comparable. Instead of averaging loss over
+tokens, it sums loss and sums *bytes* (the target tokens' UTF-8 byte lengths) independently and
+divides, over `steps` batches drawn from a plain iterable of `(x, y, ...)` (any extra elements
+after the first two, e.g. a resumable loader's cursor state, are ignored).
+
+`token_bytes` is the one tokenizer-shaped input, and it stays a caller concern, same rule as
+generation's tokenizer-free split above: it's accepted as a plain vector (list, numpy array, or
+tensor) and converted once with `torch.as_tensor`, so modelcore never has to know how a host
+obtained it. Its contract: length `vocab_size`, value = that token's byte count, `0` for any token
+to exclude from the metric (a special token like `<|bos|>`, or padding) — `0` doubles as the
+exclusion mask, so a token with a real length is counted and one without isn't, in the same pass.
+A target of `-1` (`ignore_index`) is excluded regardless of its byte length.
+
+`bos_token_id`/`doc_masking_max_docs_per_row`/`padding_id` (all optional) forward straight to
+`build_doc_args`, restricting attention to within each packed row's own document — matching
+whatever masking training used keeps val bpb comparable to the training loss it's evaluating. When
+`dist.is_initialized()` and `world_size > 1`, the byte and loss sums are `all_reduce`d before
+dividing, so every rank reports the identical, fully-reduced value.
 
 ## The meta-device footgun
 

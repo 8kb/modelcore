@@ -19,6 +19,7 @@ modelcore/
 ├── manager.py         ModelManager -- the one entrypoint
 ├── model.py            Model -- the one model class, built from a config tree
 ├── generate.py         sample_next_token, generate_naive, Decoder (cached prefill+decode)
+├── evaluate.py           evaluate_bpb -- bits-per-byte (ModelManager.evaluate_bpb is the seam)
 ├── config/
 │   ├── spec.py            ComponentSpec, ModelConfig, AttentionLayerSpec
 │   └── validate.py        validate_config() -- structural + component-owned semantic checks
@@ -109,6 +110,11 @@ modelcore/
   [docs/architecture.md](docs/architecture.md) for the full mechanism, including a real
   FA3-vs-SDPA divergence in what `k=None` means to `flash_attn_with_kvcache` that a naive sharing
   implementation would hit.
+- **`ModelManager.evaluate_bpb`'s `token_bytes` is entirely caller-supplied.** modelcore knows
+  nothing about tokenizers (see docs/architecture.md's tokenizer-free rule) -- `evaluate_bpb`
+  accepts `token_bytes` as a plain vector (list, numpy array, or tensor) and converts it once,
+  internally, with `torch.as_tensor`. A host typically gets it from its own data-prep layer (e.g.
+  a datacore-prepared dataset's own `token_bytes()`); modelcore has no opinion on that.
 
 ## Testing
 
