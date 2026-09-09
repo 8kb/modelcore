@@ -1,6 +1,6 @@
 [project]
 name = "modelcore"
-version = "0.1.0"
+version = "0.2.0"
 description = "A standalone model subsystem: configs, architectures-as-data, and the machinery to create/load/save models and optimizers"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -19,6 +19,7 @@ fa3 = [
 [dependency-groups]
 dev = [
     "pytest>=8.0.0",
+    "numpy>=1.26.0",
 ]
 
 [build-system]
