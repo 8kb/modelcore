@@ -1,0 +1,35 @@
+[project]
+name = "modelcore"
+version = "0.1.0"
+description = "A standalone model subsystem: configs, architectures-as-data, and the machinery to create/load/save models and optimizers"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.9.1",
+]
+
+[project.optional-dependencies]
+# The FA3 flash-attention kernel path (modelcore/kernels/flash_attn.py); without this installed,
+# attention falls back to torch's own scaled_dot_product_attention automatically.
+fa3 = [
+    "hf_transfer>=0.1.9",
+    "kernels>=0.11.7",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[build-system]
+requires = ["setuptools>=65.0.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["modelcore*"]
+
+[tool.pytest.ini_options]
+testpaths = ["modelcore/tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
