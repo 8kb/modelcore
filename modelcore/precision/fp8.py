@@ -283,10 +283,21 @@ def convert_to_float8_training(module, *, config=None, module_filter_fn=None, ru
             DEFAULT_RUNTIME.
     """
     filter_fn = module_filter_fn or default_module_filter
+    # Lazy import (like every other cross-module reference in modelcore.precision): an
+    # AdapterLinear's subtree -- its own base weight *and* every delta's own Linears (e.g. a
+    # LoRA's lora_A/lora_B) -- must never be touched here, so the isinstance check happens
+    # *before* recursing, not after. This is belt-and-suspenders for the deltas' tiny Linears
+    # (the default align=16/min_dim=128 filter already tends to skip them anyway, but that's
+    # luck, not intent -- see modelcore/tests/test_peft.py's explicit assertion of this guard) and
+    # load-bearing for the base weight itself, which would otherwise silently drop every delta
+    # attached to it.
+    from modelcore.peft import AdapterLinear
 
     def _convert(mod, prefix=""):
         for name, child in mod.named_children():
             fqn = f"{prefix}.{name}" if prefix else name
+            if isinstance(child, AdapterLinear):
+                continue
             _convert(child, fqn)
             if isinstance(child, nn.Linear) and not isinstance(child, Float8Linear):
                 if filter_fn(child, fqn):

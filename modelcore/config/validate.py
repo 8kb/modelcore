@@ -14,6 +14,7 @@ ValidationReport), never just the first. Split the way every other part of model
   block -- exactly what modelcore.stats.kv_cache_spec() requires at model-build time, checked here
   before a model is ever built.
 """
+import dataclasses
 import inspect
 
 from modelcore.catalog import get_component, registered_types
@@ -115,6 +116,77 @@ def _validate_kv_layout(body, errors):
         errors.append(ConfigError("body", f"kv slots are not a contiguous 0..M-1 range: {distinct_slots}"))
 
 
+def _validate_adapters(config, errors):
+    """Checks config.adapters/config.frozen: every `target`/frozen FQN resolves against the
+    *built* tree, every adapter `type` is registered, and its `params` match that delta class's
+    own constructor signature (reusing _validate_spec's inspect.signature convention above).
+
+    Unlike every other check in this module, this one needs a real (meta-device -- still no
+    tensor ever allocated) Model: an adapter target is a module attribute path inside a
+    component's own Python class (e.g. CausalSelfAttention.c_q), not something expressible from
+    ComponentSpec params alone, so there's no way to check it without building the tree it refers
+    into. Skipped entirely if the base tree already has errors (building it would likely crash
+    outright, e.g. a hard `assert n_embd % n_head == 0` inside a component's own __init__ that
+    _validate_attention_shape above exists specifically to catch before that point)."""
+    if not config.adapters and not config.frozen:
+        return
+    if errors:
+        return
+    import torch
+
+    from modelcore.model import Model
+    from modelcore.components.linear import Linear
+    from modelcore.peft.registry import get_adapter_delta_cls, registered_adapter_types
+
+    bare = dataclasses.replace(config, adapters=[], frozen=[])
+    try:
+        with torch.device("meta"):
+            model = Model(bare)
+    except Exception as e:
+        errors.append(ConfigError("adapters", f"could not build the model tree to validate adapter/frozen targets: {e}"))
+        return
+
+    seen = set()
+    for i, spec in enumerate(config.adapters):
+        path = f"adapters[{i}]"
+        try:
+            target_module = model.get_submodule(spec.target)
+        except AttributeError:
+            errors.append(ConfigError(f"{path}.target", f"no such module {spec.target!r}"))
+            continue
+        if not isinstance(target_module, Linear):
+            errors.append(ConfigError(f"{path}.target", f"{spec.target!r} is a {type(target_module).__name__}, not a Linear"))
+
+        if spec.type not in registered_adapter_types():
+            errors.append(ConfigError(f"{path}.type", f"unknown adapter type {spec.type!r}; registered: {registered_adapter_types()}"))
+        else:
+            delta_cls = get_adapter_delta_cls(spec.type)
+            sig = inspect.signature(delta_cls.__init__)
+            fixed = {"self", "in_features", "out_features"}
+            accepts_var_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+            accepted = {p for p in sig.parameters if p not in fixed}
+            if not accepts_var_kwargs:
+                for key in sorted(set(spec.params) - accepted):
+                    errors.append(ConfigError(f"{path}.params.{key}", f"{spec.type!r} has no such param"))
+                missing = [
+                    name for name, param in sig.parameters.items()
+                    if name not in fixed and name not in spec.params and param.default is inspect.Parameter.empty
+                ]
+                for name in missing:
+                    errors.append(ConfigError(f"{path}.params", f"{spec.type!r} missing required param {name!r}"))
+
+        key = (spec.target, spec.name)
+        if key in seen:
+            errors.append(ConfigError(f"{path}.name", f"adapter name {spec.name!r} already used on target {spec.target!r}"))
+        seen.add(key)
+
+    for i, fqn in enumerate(config.frozen):
+        try:
+            model.get_submodule(fqn)
+        except AttributeError:
+            errors.append(ConfigError(f"frozen[{i}]", f"no such module {fqn!r}"))
+
+
 def validate_config(config) -> ValidationReport:
     errors = []
 
@@ -147,5 +219,7 @@ def validate_config(config) -> ValidationReport:
         errors.append(ConfigError("output", "must be set"))
     else:
         _validate_spec(config.output, ctx, "output", errors)
+
+    _validate_adapters(config, errors)
 
     return ValidationReport(errors)

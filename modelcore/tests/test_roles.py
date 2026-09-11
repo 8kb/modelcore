@@ -138,3 +138,41 @@ def test_build_param_groups_skips_empty_roles():
     """A role present in the policy but with no parameters in this model produces no group."""
     groups = build_param_groups({}, policy={"matrix": dict(kind="muon", lr=0.02)})
     assert groups == []
+
+
+def test_build_param_groups_skips_frozen_params():
+    p_trainable = nn.Parameter(torch.zeros(2, 3))
+    p_frozen = nn.Parameter(torch.zeros(2, 3))
+    p_frozen.requires_grad_(False)
+    groups = build_param_groups({"matrix": [p_trainable, p_frozen]}, policy={"matrix": dict(kind="muon", lr=0.02)})
+    seen = [p for g in groups for p in g["params"]]
+    assert seen == [p_trainable]
+
+
+def test_build_param_groups_role_with_only_frozen_params_produces_no_group():
+    p_frozen = nn.Parameter(torch.zeros(2, 3))
+    p_frozen.requires_grad_(False)
+    groups = build_param_groups({"matrix": [p_frozen]}, policy={"matrix": dict(kind="muon", lr=0.02)})
+    assert groups == []
+
+
+# -----------------------------------------------------------------------------
+# modelcore.peft's delta classes declaring roles -- same protocol, exercised for real
+
+def test_lora_delta_declares_adapter_role():
+    from modelcore.peft.deltas import LoRADelta
+
+    delta = LoRADelta(8, 8, r=2, alpha=4)
+    roles = collect_param_roles(delta)
+    assert set(roles) == {"adapter"}
+    assert {id(p) for p in roles["adapter"]} == {id(delta.lora_A.weight), id(delta.lora_B.weight)}
+
+
+def test_dora_delta_declares_adapter_and_adapter_scalar_roles():
+    from modelcore.peft.deltas import DoRADelta
+
+    delta = DoRADelta(8, 8, r=2, alpha=4)
+    roles = collect_param_roles(delta)
+    assert set(roles) == {"adapter", "adapter_scalar"}
+    assert {id(p) for p in roles["adapter"]} == {id(delta.lora_A.weight), id(delta.lora_B.weight)}
+    assert roles["adapter_scalar"] == [delta.magnitude]

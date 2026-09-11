@@ -403,6 +403,99 @@ weight/bias (for full-precision eval), restoring on exit; it's a no-op if the tr
 modules. Both are safe to call at any point in a model's lifecycle — an optimizer built after
 `enable_fp8` sees ordinary `"matrix"`-role parameters, same as before conversion.
 
+## Adapters in the config tree
+
+`modelcore/peft/` adds LoRA and DoRA (weight-decomposed LoRA, https://arxiv.org/abs/2402.09353) as
+low-rank adapters — but expressed as **config**, not a post-build transform like FP8 above. The
+difference matters: `enable_fp8` is a one-shot call over an already-built model, invisible to
+`config.to_dict()`, so an fp8 model's config doesn't know fp8 happened. An adapter done that way
+would be un-editable — you couldn't hand-edit a checkpoint's `meta.json` to disable one and
+reload. So `ModelConfig` carries two more fields, `adapters: list[AdapterSpec]` and `frozen:
+list[str]`, applied automatically by `Model.__init__` over the already-built tree, the same
+"materialized DSL" `ComponentSpec` already is for architecture (see "The materialized config
+tree" above) — a `list[AdapterSpec]` is just as much a tree of already-concrete values as a
+`ComponentSpec` tree, and follows the same rule: no derivation, only concrete FQNs and params. The
+family's move toward config-first "DSL"s for data prep and training plans is headed the same
+direction; adapters are the first instance of it outside architecture itself.
+
+```python
+@dataclass
+class AdapterSpec:
+    target: str            # module FQN relative to the Model root, e.g. "body.blocks.3.attn.c_q"
+    name: str               # stable handle: keys its state_dict entries, and what a caller
+                            # enables/disables/re-adds by
+    type: str               # a modelcore.peft.registry name -- "lora" | "dora" today
+    params: dict            # that delta class's own constructor kwargs (r, alpha, dropout, ...)
+    enabled: bool = True
+```
+
+Both `adapters` and `frozen` are omitted from `to_dict()` when empty, so every config written
+before this feature existed still serializes byte-identically.
+
+**`AdapterLinear`** (`modelcore/peft/apply.py`) is the one structural piece, and it subclasses
+`Linear` for the exact reason `Float8Linear` does — it's the marker `collect_param_roles`/
+`num_matmul_params` key off. It owns zero or more named **deltas** in an `nn.ModuleDict`, plus a
+plain Python `enabled: dict[str, bool]` — deliberately *not* a buffer or Parameter, so toggling it
+touches nothing on disk:
+
+```python
+def forward(self, x):
+    base_weight = self.weight.to(dtype=x.dtype)
+    y = F.linear(x, base_weight)
+    for name, delta in self.deltas.items():
+        if self.enabled.get(name, True):
+            y = delta(x, y, base_weight)
+    return y
+```
+
+A delta's `forward(x, y, base_weight) -> y'` takes the running output so it can either add to it
+(`LoRADelta`: `y + (alpha/r) * B(A(x))`, B zero-initialized so a fresh adapter is an exact
+forward no-op) or replace it with a fresh weight-space computation (`DoRADelta`, which needs
+`base_weight` to reconstruct `magnitude * normalize(W0 + BA)` and so ignores whatever `y` it was
+passed — stacking a weight-space delta after another delta on the same target silently drops the
+earlier one's contribution; avoid that combination). `A`/`B` are modelcore `Linear`s too, not bare
+`Parameter`s, so they get the compute-dtype cast and FLOPs accounting for free; their `PARAM_ROLES`
+override sends them to a new `"adapter"` role (`"adapter_scalar"` for DoRA's `magnitude`) instead
+of falling through to `Linear`'s default `"matrix"` — a rank-`r` factor is the wrong shape for
+Muon's Newton-Schulz step, so both new roles route through AdamW, appended at the end of
+`ModelManager.create_optimizer`'s policy dict (order is the on-disk param-group layout, same rule
+as every other role).
+
+`Model.__init__` applies `config.frozen` *before* `config.adapters`, and the order is load-bearing:
+`apply_adapters` shares (not copies) a target's existing `weight` `Parameter` object into the new
+`AdapterLinear`, so a base weight already frozen stays frozen after conversion, while every delta's
+own params (freshly constructed) default to trainable. Reversing the order would instead recurse
+`requires_grad_(False)` into the delta submodules too. An adapter's own on/off state doesn't need a
+separate frozen-FQN path at all: `AdapterLinear.set_enabled` toggles `requires_grad_` on the whole
+delta in lockstep with `enabled`, since a disabled delta never enters the forward computation and
+would otherwise leave a permanently-`None`-grad parameter sitting in an optimizer group —
+`MuonAdamW.step()` dereferences `p.grad` unconditionally and crashes on that, doesn't silently
+no-op.
+
+**Loading is reconciling, not strict, once adapters exist.** `ModelManager.load_model`'s
+`strict=True` is exactly what makes "hand-edit a config, reload" impossible on its own — a
+`load_state_dict` call would reject any key under some `AdapterLinear`'s `deltas` (the
+`".deltas."` substring is the load-bearing convention both sides share) that the checkpoint and
+the config disagree about. So when `config.adapters` is non-empty, `load_model` does
+`load_state_dict(state, strict=False, ...)` and requires every `missing_keys`/`unexpected_keys`
+entry to be an adapter key — a newly hand-added adapter is left at its (already-computed) init
+value, a removed one is silently dropped, anything else still raises exactly as before. A config
+with *no* adapters takes the original `strict=True` path, byte-identical to before this existed.
+
+Two more manager methods round this out: `merge_adapters(model)` folds every enabled delta into
+its target's base weight and swaps back to a plain `Linear` (for serving/eval throughput, without
+touching `model.config` — a fresh unmerged model can still be built from it), and
+`adapters_disabled(model)` is a context manager (mirroring `fp8_disabled`) that temporarily
+disables every adapter, for an eval of the base model underneath its adapters.
+
+IA3 and prefix-tuning fit the same seam without a design change: a new delta class plus one
+`@register_adapter(name)` decorator, and (for prefix-tuning) an `AdapterSpec.target` naming a
+whole module rather than a `Linear` — the FQN-keyed spec already expresses that. QLoRA (a
+quantized frozen base) would live in `modelcore/precision/`, the module boundary that already
+exists "so a future precision scheme has somewhere to live without `ModelManager` growing a case
+per scheme" — composing with a delta the same way the FP8 guard above makes FP8 and LoRA coexist
+rather than clobber.
+
 ## Generation primitives
 
 `modelcore/generate.py` holds the tokenizer-agnostic half of autoregressive generation:

@@ -42,12 +42,18 @@ def test_loss_is_finite_scalar(manager, config):
 
 
 def test_backward_populates_every_gradient(manager, config):
+    """Every *trainable* parameter gets a gradient -- not literally every parameter: a frozen
+    subtree (config.frozen) or a disabled adapter delta (AdapterLinear.set_enabled) has
+    requires_grad=False by construction and is expected to have no .grad, same as it having no
+    optimizer group (see modelcore.roles.build_param_groups)."""
     model = build(manager, config)
     idx = torch.randint(0, config.vocab_size, (2, 8))
     targets = torch.randint(0, config.vocab_size, (2, 8))
     loss = model(idx, targets=targets)
     loss.backward()
     for name, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
         assert p.grad is not None, f"{name} got no gradient"
         assert torch.isfinite(p.grad).all(), f"{name} has a non-finite gradient"
 
@@ -87,13 +93,18 @@ def test_llama_flavor_has_no_gpt_residual_topology_extras(manager):
 
 
 def test_optimizer_groups_partition_parameters_exactly(manager, config):
+    """Every *trainable* parameter is grouped exactly once, and nothing else is: a frozen or
+    disabled-adapter parameter must never land in a group, since MuonAdamW.step() dereferences
+    p.grad unconditionally and such a parameter's grad is always None (see
+    modelcore.roles.build_param_groups)."""
     model = build(manager, config)
     optimizer = manager.create_optimizer(model, OptimizerHparams())
     seen = []
     for group in optimizer.param_groups:
         seen.extend(group["params"])
     assert len(seen) == len(set(id(p) for p in seen)), "a parameter appeared in more than one group"
-    assert {id(p) for p in seen} == {id(p) for p in model.parameters()}
+    trainable = {id(p) for p in model.parameters() if p.requires_grad}
+    assert {id(p) for p in seen} == trainable
 
 
 def test_layer_specs_and_kv_cache_spec_are_consistent(manager, config):

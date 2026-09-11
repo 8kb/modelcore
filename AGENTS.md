@@ -33,6 +33,8 @@ modelcore/
 ├── runtime.py             Runtime (compute dtype, log sink) -- injected, not a global
 ├── precision/
 │   └── fp8.py              Float8Linear + convert_to_float8_training (ModelManager.enable_fp8)
+├── peft/                   AdapterLinear, LoRADelta/DoRADelta, apply_adapters/find_adapters/
+│                           merge_adapters/strip_adapters -- see "Adapters are config" below
 ├── optim/                  MuonAdamW
 ├── kernels/                FA3/SDPA flash-attention interface
 ├── cache.py                KVCache
@@ -110,6 +112,35 @@ modelcore/
   [docs/architecture.md](docs/architecture.md) for the full mechanism, including a real
   FA3-vs-SDPA divergence in what `k=None` means to `flash_attn_with_kvcache` that a naive sharing
   implementation would hit.
+- **Adapters (LoRA/DoRA) are config, not a transform.** Unlike `enable_fp8` (a one-shot call over
+  an already-built model, invisible to `config.to_dict()`), `ModelConfig.adapters`/`.frozen` are
+  fields on the config tree itself, applied automatically inside `Model.__init__` — the same
+  "materialized DSL" `ComponentSpec` already is for architecture (see docs/architecture.md's
+  "Adapters in the config tree"). This is *why* it's config: a caller can hand-edit a checkpoint's
+  `meta.json` (enable/disable/add an `AdapterSpec`) and reload via `ModelManager.load_model`'s
+  reconciling load, with no state-dict surgery. `frozen` is applied *before* adapters are attached
+  (`Model.__init__`'s order, not incidental) — freezing shares the target's existing weight
+  `Parameter` object into the new `AdapterLinear`, so the base stays frozen while a freshly
+  constructed delta defaults to trainable; reversing the order would instead recurse into the
+  delta too. An adapter's own on/off state (`AdapterLinear.set_enabled`) also toggles
+  `requires_grad_` on the whole delta — a disabled delta never enters the forward computation, so
+  leaving it `requires_grad=True` would put a permanently-`None`-grad parameter into an optimizer
+  group, which `MuonAdamW.step()` dereferences unconditionally and crashes on.
+- **`init_adapter_weights` is a separate pass from `init_weights()`, and must stay scoped to
+  `AdapterLinear`.** `Model.init_weights()` calls it in its own pass, *after* every base weight
+  already has real values (DoRA's magnitude is initialized from the base weight's own row norms).
+  The pass is `isinstance(m, AdapterLinear)`, not "every module defining `init_adapter_weights`" —
+  each delta *also* defines the method (so `AdapterLinear.init_adapter_weights` can call it on its
+  own children with the right `base_weight` argument), and a second, duck-typed call directly on
+  the delta would both waste RNG draws and hard-fail DoRA, whose signature requires `base_weight`.
+- **New optimizer roles (`"adapter"`, `"adapter_scalar"`) are appended at the end of the policy
+  dict**, same rule as every other role — see the optimizer-state-is-positional invariant below.
+- **`build_param_groups` drops any `requires_grad=False` parameter**, not just leaves it ungrouped
+  — a frozen or disabled-adapter parameter's `.grad` is always `None`, and `MuonAdamW.step()`
+  dereferences it unconditionally.
+- **`convert_to_float8_training`'s walk skips an `AdapterLinear`'s entire subtree** (checked
+  *before* recursing, not after) — fp8-converting a LoRA/DoRA's own tiny `lora_A`/`lora_B` Linears,
+  or the base weight underneath a delta, would silently drop the delta's contribution.
 - **`ModelManager.evaluate_bpb`'s `token_bytes` is entirely caller-supplied.** modelcore knows
   nothing about tokenizers (see docs/architecture.md's tokenizer-free rule) -- `evaluate_bpb`
   accepts `token_bytes` as a plain vector (list, numpy array, or tensor) and converts it once,

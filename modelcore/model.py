@@ -45,6 +45,21 @@ class Model(nn.Module):
         self.body = build_component(config.body, ctx)
         self.unembedding = build_component(config.output, ctx)
 
+        # Adapters and freezing are applied last, over the fully-built tree -- see
+        # modelcore/docs/architecture.md's "Adapters in the config tree". Freezing runs *before*
+        # apply_adapters, and must: apply_adapters shares (not copies) each target's existing
+        # weight Parameter object into the new AdapterLinear, so a base weight already frozen here
+        # stays frozen after conversion, while every delta's own params (freshly constructed by
+        # apply_adapters) default to trainable -- freezing "the same FQN" after conversion would
+        # instead recurse into the delta submodules too and freeze them along with the base
+        # weight, which is never what `frozen` means (an adapter's own trainability is `enabled`
+        # on its AdapterSpec, applied by apply_adapters itself -- see modelcore.peft.apply).
+        for fqn in config.frozen:
+            self.get_submodule(fqn).requires_grad_(False)
+        if config.adapters:
+            from modelcore.peft import apply_adapters
+            apply_adapters(self, config.adapters)
+
     @torch.no_grad()
     def init_weights(self):
         self.embedding.init_weights()
@@ -52,6 +67,20 @@ class Model(nn.Module):
             m.init_weights()
         self.body.init_weights()
         self.unembedding.init_weights()
+        # A second pass for adapters: AdapterLinear.init_adapter_weights (a name deliberately
+        # distinct from the init_weights() component protocol above -- see modelcore/peft/deltas.py)
+        # must run after every base weight already has its real value, since e.g. DoRA's magnitude
+        # is initialized from the base weight's own column norms. Scoped to AdapterLinear
+        # specifically (not "every module defining init_adapter_weights"): each delta module
+        # *also* defines this method, and AdapterLinear.init_adapter_weights already calls each of
+        # its own deltas' with the right base_weight argument -- calling it a second time directly
+        # on the delta (with no base_weight) would both waste RNG draws and hard-fail DoRA, whose
+        # init_adapter_weights requires base_weight.
+        if self.config.adapters:
+            from modelcore.peft import AdapterLinear
+            for m in self.modules():
+                if isinstance(m, AdapterLinear):
+                    m.init_adapter_weights()
 
     def layer_specs(self):
         """Internal to modelcore: used by ModelManager.stats()/new_kv_cache(), not part of

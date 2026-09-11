@@ -9,7 +9,7 @@ generic tests would trip the corresponding preset too.
 import pytest
 import torch
 
-from modelcore import ComponentSpec, ModelConfig, ModelManager
+from modelcore import AdapterSpec, ComponentSpec, ModelConfig, ModelManager
 
 
 def _gpt_like(n_layer=4, n_head=2, n_kv_head=2, n_embd=64, head_dim=32, vocab_size=128, sequence_len=32, window=-1):
@@ -49,11 +49,27 @@ def _plain_like(n_layer=4, n_head=2, n_kv_head=2, n_embd=64, head_dim=32, vocab_
     )
 
 
+def _gpt_lora():
+    """_gpt_like() with the whole body frozen and a LoRA adapter on two attention projections in
+    layer 0 -- runs apply_adapters/the freeze-then-apply ordering, the "adapter" optimizer role,
+    and the reconciling load_model path through every generic test in test_manager.py. Embedding/
+    unembedding/shared stay trainable, so the frozen-vs-trainable split is meaningfully exercised
+    rather than degenerating to "everything is frozen" or "nothing is"."""
+    config = _gpt_like()
+    config.frozen = ["body"]
+    config.adapters = [
+        AdapterSpec(target="body.blocks.0.attn.c_q", name="t0", type="lora", params={"r": 4, "alpha": 8}),
+        AdapterSpec(target="body.blocks.0.attn.c_v", name="t0", type="lora", params={"r": 4, "alpha": 8}),
+    ]
+    return config
+
+
 FLAVORS = {
     "gpt": lambda: _gpt_like(),
     "llama": lambda: _plain_like(),
     "llama_kvshare": lambda: _plain_like(kv_slots=[0, 1, 1, 1]),
     "llama_kvshare_win": lambda: _plain_like(window=8, kv_slots=[0, 1, 1, 1]),
+    "gpt_lora": _gpt_lora,
 }
 
 

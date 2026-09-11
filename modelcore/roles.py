@@ -90,14 +90,20 @@ def build_param_groups(role_params: dict[str, list[nn.Parameter]], policy: dict[
     not just a style choice.
 
     A role with kind="muon" is split into one group per parameter shape -- Muon stacks same-shape
-    params for its fused Newton-Schulz/Polar-Express step (see modelcore.optim.MuonAdamW)."""
+    params for its fused Newton-Schulz/Polar-Express step (see modelcore.optim.MuonAdamW).
+
+    A param with requires_grad=False is dropped here, not merely left ungrouped: MuonAdamW.step()
+    dereferences p.grad unconditionally, so a frozen param (Model.__init__'s config.frozen) or a
+    disabled adapter delta (AdapterLinear.set_enabled) sitting in a group -- with no gradient ever
+    flowing into it -- would crash the very first optimizer step, not silently no-op. A role whose
+    every param is frozen/disabled then simply produces no group, same as an empty role."""
     unknown = set(role_params) - set(policy)
     if unknown:
         raise ValueError(f"parameter roles present but not in the optimizer policy: {sorted(unknown)}")
 
     groups = []
     for role, hparams in policy.items():
-        params = role_params.get(role, [])
+        params = [p for p in role_params.get(role, []) if p.requires_grad]
         if not params:
             continue
         if hparams["kind"] == "muon":

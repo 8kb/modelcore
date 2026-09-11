@@ -51,6 +51,40 @@ class ComponentSpec:
         return cls(type=type_, params={k: _resolve(v) for k, v in d.items()})
 
 
+@dataclass
+class AdapterSpec:
+    """One materialized low-rank adapter attached to a single Linear-valued target -- the same
+    "already-concrete, never a derivation rule" convention ComponentSpec follows (see this
+    module's docstring and modelcore/docs/architecture.md's "Adapters in the config tree").
+
+    `target` is a module FQN relative to the Model root (e.g. "body.blocks.3.attn.c_q", exactly
+    what Model.get_submodule resolves) -- concrete, never a pattern or a layer range; a host-side
+    low-code layer (e.g. nanochat.architectures.adapters.expand_adapters) is what turns "every
+    attn.c_q" into a list of these. `name` is the stable handle a caller enables/disables/re-adds
+    an adapter by, and the key its delta's own params live under in the state dict (target +
+    ".deltas." + name + ...) -- see modelcore.peft.apply.AdapterLinear. `type` names an entry in
+    modelcore.peft.registry ("lora", "dora", ...); `params` are that delta class's own constructor
+    kwargs (e.g. r/alpha/dropout for LoRA) besides in_features/out_features, which come from the
+    target itself. `enabled` toggling is the whole point of this being config rather than a
+    one-shot transform: flip it and reload, no retraining, no state-dict surgery."""
+    target: str
+    name: str
+    type: str
+    params: dict = field(default_factory=dict)
+    enabled: bool = True
+
+    def to_dict(self) -> dict:
+        return {"target": self.target, "name": self.name, "type": self.type,
+                "params": dict(self.params), "enabled": self.enabled}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "AdapterSpec":
+        return cls(
+            target=d["target"], name=d["name"], type=d["type"],
+            params=dict(d.get("params", {})), enabled=d.get("enabled", True),
+        )
+
+
 def _resolve(value):
     """Recursively turn any dict carrying "#type" -- at any depth, including inside a list -- into
     a ComponentSpec. This one rule is what makes nested composers and multiple block lists work
@@ -109,6 +143,12 @@ class ModelConfig:
     input: ComponentSpec | None = None
     body: ComponentSpec | None = None
     output: ComponentSpec | None = None
+    adapters: list = field(default_factory=list)  # list[AdapterSpec] -- see AdapterSpec above
+    frozen: list = field(default_factory=list)     # module FQNs; that subtree gets
+                                                    # requires_grad_(False) at build time (see
+                                                    # Model.__init__). Concrete FQNs only, never a
+                                                    # glob -- a host-side layer materializes these
+                                                    # the same way it materializes `adapters`.
 
     @property
     def padded_vocab_size(self) -> int:
@@ -125,13 +165,21 @@ class ModelConfig:
         assert self.input is not None and self.body is not None and self.output is not None, (
             "ModelConfig.to_dict() requires input/body/output to already be set"
         )
-        return {
+        d = {
             "format": FORMAT,
             "sequence_len": self.sequence_len, "vocab_size": self.vocab_size, "n_embd": self.n_embd,
             "pad_vocab_size_to": self.pad_vocab_size_to, "reference": self.reference,
             "shared": {k: v.to_dict() for k, v in self.shared.items()},
             "input": self.input.to_dict(), "body": self.body.to_dict(), "output": self.output.to_dict(),
         }
+        # Omitted when empty (rather than an explicit []) so a pre-adapters config serializes
+        # byte-identically to before -- every existing golden/checkpoint dict must round-trip
+        # unchanged.
+        if self.adapters:
+            d["adapters"] = [a.to_dict() for a in self.adapters]
+        if self.frozen:
+            d["frozen"] = list(self.frozen)
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "ModelConfig":
@@ -144,4 +192,6 @@ class ModelConfig:
             input=ComponentSpec.from_dict(d["input"]),
             body=ComponentSpec.from_dict(d["body"]),
             output=ComponentSpec.from_dict(d["output"]),
+            adapters=[AdapterSpec.from_dict(a) for a in d.get("adapters", [])],
+            frozen=list(d.get("frozen", [])),
         )

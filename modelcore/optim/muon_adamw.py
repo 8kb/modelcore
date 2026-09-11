@@ -283,13 +283,21 @@ class MuonAdamW(torch.optim.Optimizer):
                 # Small params: all_reduce (no scatter/gather needed)
                 future = dist.all_reduce(grad, op=dist.ReduceOp.AVG, async_op=True).get_future()
                 param_infos[p] = dict(future=future, grad_slice=grad, is_small=True)
-            else:
+            elif grad.shape[0] % world_size == 0:
                 # Large params: reduce_scatter
-                assert grad.shape[0] % world_size == 0, f"AdamW reduce_scatter requires shape[0] ({grad.shape[0]}) divisible by world_size ({world_size})"
                 rank_size = grad.shape[0] // world_size
                 grad_slice = torch.empty_like(grad[:rank_size])
                 future = dist.reduce_scatter_tensor(grad_slice, grad, op=dist.ReduceOp.AVG, async_op=True).get_future()
                 param_infos[p] = dict(future=future, grad_slice=grad_slice, is_small=False)
+            else:
+                # >=1024 elements but shape[0] doesn't divide evenly across ranks (e.g. a LoRA
+                # "A" factor of shape (r, in_features) with r < world_size, or not a multiple of
+                # it) -- fall back to the same all_reduce + full-param-update path as a small
+                # param, rather than asserting. Optimizer state is then replicated instead of
+                # sharded for this one param; the same tradeoff every <1024-element param already
+                # accepts, just for a different reason (irregular shape instead of small size).
+                future = dist.all_reduce(grad, op=dist.ReduceOp.AVG, async_op=True).get_future()
+                param_infos[p] = dict(future=future, grad_slice=grad, is_small=True)
         return dict(param_infos=param_infos)
 
     def _reduce_muon(self, group: dict, world_size: int) -> dict:
