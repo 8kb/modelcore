@@ -76,9 +76,9 @@ uv sync --group dev
 python -m pytest modelcore/tests -v
 ```
 
-A host application (e.g. [8kb/nanochat](https://github.com/8kb/nanochat)) pins this repo by git
-tag in its own `pyproject.toml` (`[tool.uv.sources]`) — `uv sync` there fetches this exact tag.
-For the cross-repo inner dev loop, editing both together without round-tripping through a tag:
+A host application pins this repo by git tag in its own `pyproject.toml` (`[tool.uv.sources]`) —
+`uv sync` there fetches this exact tag. For the cross-repo inner dev loop, editing both together
+without round-tripping through a tag:
 
 ```bash
 # from the host repo, after its own uv sync has run once

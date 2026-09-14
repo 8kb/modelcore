@@ -7,10 +7,10 @@ For the family-wide pattern this repo follows (one entrypoint, zero host imports
 consumption contract) see [llmllab/AGENTS.md](../llmllab/AGENTS.md) and
 [llmllab/docs/subsystem-conventions.md](../llmllab/docs/subsystem-conventions.md).
 
-Its host application is [8kb/nanochat](https://github.com/8kb/nanochat), which pins this repo by
-git tag (`pyproject.toml`'s `[tool.uv.sources]`) and consumes it entirely through `ModelManager` —
-see nanochat's own [docs/architecture.md](https://github.com/8kb/nanochat/blob/master/docs/architecture.md)
-for that side.
+A host application pins this repo by git tag (`pyproject.toml`'s `[tool.uv.sources]`) and consumes
+it entirely through `ModelManager` — see [`llmllab/AGENTS.md`](../llmllab/AGENTS.md)'s family map
+for which repos currently do that, and each one's own `docs/architecture.md` for its side of the
+contract.
 
 ## Repo map
 
@@ -70,23 +70,24 @@ modelcore/
 - **A config tree carries only concrete, already-decided values, never a derivation rule.**
   `has_value_embed` is a plain bool per block, `window` a concrete int, `kv_slot`/`produces_kv`
   concrete per-block values — never a pattern string or a fraction a component would need to
-  interpret. Every rule that produces these values lives one layer up, in the host application
-  (nanochat's `nanochat/architectures/derive.py`), run once at tree-expansion time, outside this
-  package entirely. A component asking "which layer am I" or "how many layers are there" to
-  re-derive a policy is exactly the abstraction leak this package's design eliminated.
+  interpret. Every rule that produces these values lives one layer up, in the host application's
+  own preset/depth-dial layer (`nanochat/architectures/derive.py`, `tinylab/presets.py`), run once
+  at tree-expansion time, outside this package entirely. A component asking "which layer am I" or
+  "how many layers are there" to re-derive a policy is exactly the abstraction leak this package's
+  design eliminated.
 - **`ArtifactStore` is a real code path, not aspirational.** Saving/loading always goes through an
   `ArtifactStore` (`FileSystemStore` is the built-in one) — never `torch.save`/`torch.load`
-  directly. A host application adapting an old on-disk format (nanochat's
-  `LegacyCheckpointStore(FileSystemStore)`) should subclass the store, not add a third way to
-  read/write the same files.
+  directly. A host application adapting an old on-disk format should subclass the store, not add a
+  third way to read/write the same files (nanochat's `LegacyCheckpointStore` is a worked example —
+  see its own [docs/architecture.md](https://github.com/8kb/nanochat/blob/master/docs/architecture.md)).
 - **Optimizer state is checkpointed and reloaded positionally.** `torch.optim.Optimizer.state_dict()`
   flattens every parameter across every group into one global index order; a parameter that
   splits, merges, or moves group changes that indexing, and a same-size reorder corrupts state
   silently (no shape-mismatch error) rather than loudly. `ModelManager.create_optimizer`'s policy
   dict order is therefore part of the on-disk format, not just a style choice — see
   [docs/architecture.md#component-contracts](docs/architecture.md#component-contracts). A change
-  that reorders or resplits needs a migration path in the host application (nanochat's
-  `nanochat/architectures/legacy.py`) or old optimizer shards fail to load.
+  that reorders or resplits needs a migration path in whichever host application has old shards to
+  read, or they fail to load (nanochat's `nanochat/architectures/legacy.py` is a worked example).
 - **`kv_cache.advance()` belongs to `Model.forward`, not the last attention layer.** It fires once,
   after the whole block/composer loop runs — broken the moment a model has fewer KV slots than
   layers (cross-layer KV sharing), since no layer's index then equals the slot count.
@@ -160,10 +161,11 @@ CUDA-less machine. `test_standalone.py` mechanically checks that nothing under `
 a host application — see [docs/architecture.md](docs/architecture.md#verifying-a-change-is-behavior-preserving)
 for the from-scratch standalone-copy recipe.
 
-A change here that a host application depends on needs that host's own suite run against it too —
-for nanochat, `tests/test_goldens.py`/`tests/test_architectures.py` after an editable install
-(`uv pip install -e ../modelcore` from nanochat's venv) — modelcore's own tests proving *this
-package* still works is necessary but not sufficient proof the host is unaffected.
+A change here that a host application depends on needs that host's own suite run against it too,
+after an editable install (`uv pip install -e ../modelcore` from the host's venv) — see
+[`llmllab/docs/subsystem-conventions.md`](../llmllab/docs/subsystem-conventions.md)'s tag-bump rule.
+modelcore's own tests proving *this package* still works is necessary but not sufficient proof a
+host is unaffected.
 
 **Untested on a CUDA-less machine**, as a consequence of the above: the `bfloat16` compute path,
 the real FA3 kernel path (vs. the SDPA fallback it's checked against), the real fp8 `_scaled_mm`

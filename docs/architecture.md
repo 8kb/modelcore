@@ -8,12 +8,10 @@ architecture *names*, CLI flags, checkpoint tags, or tokenizers. It has zero imp
 (plus `torch`, and an optional `kernels` dependency for the FA3 kernel path) — see
 `tests/test_standalone.py` for the mechanical proof.
 
-In its host application, [8kb/nanochat](https://github.com/8kb/nanochat), `nanochat/architectures/`
-is the layer that turns a `--depth` dial or an old checkpoint into a tree for `modelcore` to build,
-and `nanochat/checkpoint_manager.py`/`nanochat/engine.py` are the layer that adapts checkpoint
-naming/tokenizers/tool-use onto `ModelManager`. See
-[nanochat's docs/architecture.md](https://github.com/8kb/nanochat/blob/master/docs/architecture.md)
-for that side of the contract; this document only covers `modelcore` itself.
+A host application's own preset/depth-dial layer is what turns a dial (or an old checkpoint) into a
+tree for `modelcore` to build, and its own checkpoint-naming/tokenizer/tool-use layer is what adapts
+that onto `ModelManager` — see that host's own `docs/architecture.md` for its side of the contract;
+this document only covers `modelcore` itself.
 
 ```
 modelcore/
@@ -125,8 +123,8 @@ it's provenance, not something `modelcore` ever reads back to decide how to buil
 ### Only concrete, already-decided values — no rules
 
 A config tree carries no *derivation rules*, only their already-computed output. Every value that
-used to be a rule lives outside `modelcore`, run once at tree-expansion time (in this repo, that's
-`nanochat/architectures/derive.py`):
+used to be a rule lives outside `modelcore`, run once at tree-expansion time, in the host
+application's own preset/depth-dial layer (`nanochat/architectures/derive.py`, `tinylab/presets.py`):
 
 - `has_value_embed`: a plain `bool` a `gpt_block`'s params carry directly — not `None` meaning
   "derive the alternating-by-parity pattern from `n_layer`". `Block` (the class backing
@@ -290,11 +288,10 @@ touches the key(s) it owns.
 
 A store is deliberately narrow and duck-typed (not an ABC) — `ArtifactStore` is a protocol, not a
 base class a caller is required to subclass. This is the seam a host application uses to adapt an
-old, pre-`modelcore` format onto `ModelManager` without core ever learning that old formats exist:
-in nanochat, `nanochat.checkpoint_manager.LegacyCheckpointStore(FileSystemStore)` overrides
-`read_config`/`read_model_state` to run a legacy checkpoint through `nanochat.architectures.legacy`
-on first read, memoized, before handing bytes to `ModelManager.load_model` — `modelcore` itself
-never has a legacy code path.
+old, pre-`modelcore` format onto `ModelManager` without core ever learning that old formats exist —
+`modelcore` itself never has a legacy code path. See
+[nanochat's `LegacyCheckpointStore`](https://github.com/8kb/nanochat/blob/master/docs/architecture.md)
+for a worked example.
 
 ## `Runtime`: no more ambient globals
 
@@ -303,9 +300,10 @@ config: `compute_dtype` and a log sink. A component that needs it declares `need
 same mechanism as `rope` or `n_embd`. `detect_compute_dtype()` reads `MODELCORE_DTYPE` from the
 environment (CUDA capability, else fp32, as a fallback); a host application's own
 `COMPUTE_DTYPE`-shaped global should source its value from `modelcore.runtime.DEFAULT_RUNTIME`
-rather than the other way around, since `modelcore` has zero dependencies on its host (in nanochat,
-`nanochat.common.COMPUTE_DTYPE`/`COMPUTE_DTYPE_REASON` do exactly this, and also accept
-`NANOCHAT_DTYPE` as a back-compat alias for `MODELCORE_DTYPE`).
+rather than the other way around, since `modelcore` has zero dependencies on its host (both
+`nanochat.common.COMPUTE_DTYPE`/`COMPUTE_DTYPE_REASON` and `tinylab.runtime.COMPUTE_DTYPE`/
+`COMPUTE_DTYPE_REASON` do exactly this; nanochat's also accepts `NANOCHAT_DTYPE` as a back-compat
+alias for `MODELCORE_DTYPE`).
 
 ## Adding a component, step by step
 
@@ -320,9 +318,9 @@ rather than the other way around, since `modelcore` has zero dependencies on its
 4. Import the module from `modelcore/components/__init__.py` (or `composers/__init__.py`) so the
    decorator runs.
 5. If it needs testing at the tree level rather than in isolation, add a flavor to
-   `modelcore/tests/conftest.py`'s `FLAVORS` dict. If it should be reachable from the host
-   application's own depth-dial CLI, add it there too (in nanochat, that's
-   `nanochat/architectures/presets.py`).
+   `modelcore/tests/conftest.py`'s `FLAVORS` dict. If it should be reachable from a host
+   application's own depth-dial CLI, add it there too (`nanochat/architectures/presets.py`,
+   `tinylab/presets.py`).
 
 ## Cross-layer KV sharing
 
@@ -509,8 +507,8 @@ rather than clobber.
   `ModelManager.new_decoder(model, tokens, *, num_samples=1, max_tokens=None, device=None)`.
 
 None of this knows about tokenizers, special tokens, or tool use — a host application layers those
-concerns on top, driving `Decoder` for the actual model-stepping (in nanochat,
-`nanochat.engine.Engine` adds the chat-token/calculator state machine around exactly this).
+concerns on top, driving `Decoder` for the actual model-stepping (`nanochat.engine.Engine` and
+`tinylab.engine.Engine` both add a chat-token/calculator state machine around exactly this).
 
 ## Bits-per-byte evaluation
 
@@ -551,9 +549,9 @@ names. One consequence: the exact sequence of RNG calls during a from-scratch `i
 not guaranteed stable across a refactor of shared code (same individual `torch.nn.init.*` calls,
 potentially different order) — this does not affect *loading* an existing checkpoint (its saved
 values fully override whatever `init_weights()` produced), only bit-for-bit reproducibility of a
-brand-new from-scratch run at a given seed. This is why the host application's own regression
-goldens (nanochat's `tests/goldens/tiny/*`) load real saved weights into a freshly-built model
-rather than comparing two independently-seeded `init_weights()` calls.
+brand-new from-scratch run at a given seed. This is why a host application's own regression
+goldens should load real saved weights into a freshly-built model rather than comparing two
+independently-seeded `init_weights()` calls (nanochat's `tests/goldens/tiny/*` is a worked example).
 
 ## Precision
 
@@ -597,15 +595,17 @@ over every flavor), and a forward/backward pass produces finite output and popul
 gradient.
 
 **Behavior preservation for a host application's use of `modelcore` is that host's own concern, not
-this repo's.** nanochat is the worked example: its `tests/goldens/*.json` (including the four
-`tiny_composed_*` presets — modelcore's own pre-Stage-7 baseline, moved here at Stage 8 then back
-to nanochat at Stage 10 once modelcore became its own repo, see the `llmllab` family repo's
-`docs/subsystem-conventions.md#where-a-golden-belongs`, currently local-only alongside this repo)
-record real accounting numbers, generation, and forward logits against known checkpoints, replayed
-by `tests/test_goldens.py`/`tests/test_architectures.py`. A change here that a host depends on
-should be checked against that host's own suite too — for nanochat, after
-`uv pip install -e ../modelcore` from its venv — before considering the change complete; passing
-modelcore's own suite is necessary but not proof the host is unaffected. See
+this repo's.** A change here that a host depends on should be checked against that host's own
+suite too, after an editable install (`uv pip install -e ../modelcore` from its venv) — passing
+modelcore's own suite is necessary but not proof a host is unaffected. See
+[`llmllab/docs/subsystem-conventions.md`](../llmllab/docs/subsystem-conventions.md)'s tag-bump rule
+for the general contract. nanochat is a worked example of a host carrying its own regression
+goldens for this: its `tests/goldens/*.json` (including the four `tiny_composed_*` presets —
+modelcore's own pre-Stage-7 baseline; see
+[`llmllab/docs/subsystem-conventions.md`](../llmllab/docs/subsystem-conventions.md#where-a-golden-belongs)
+for why a golden proving a *host's* behavior lives in the host, not here, even when the code it
+covers moved into a subsystem) record real accounting numbers, generation, and forward logits
+against known checkpoints, replayed by
+`tests/test_goldens.py`/`tests/test_architectures.py` — see
 [nanochat's docs/architecture.md](https://github.com/8kb/nanochat/blob/master/docs/architecture.md#verifying-a-change-is-behavior-preserving)
-for that side, including how a host layer (`nanochat/architectures/`, `nanochat/checkpoint_manager.py`,
-`nanochat/engine.py`) verifies its own changes.
+for how that host layer verifies its own changes.
