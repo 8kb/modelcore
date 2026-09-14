@@ -95,13 +95,13 @@ def _validate_kv_layout(body, errors):
     blocks = _collect_block_specs(body, "body")
     if not blocks:
         return
-    n_kv_heads, head_dims, slots = set(), set(), []
+    n_heads, n_kv_heads, slots = set(), set(), []
     for i, (path, block_spec) in enumerate(blocks):
         p = block_spec.params
         n_head = p.get("n_head")
         n_kv_head = p.get("n_kv_head", n_head)
-        if n_head:
-            head_dim = None  # head_dim isn't itself a block param (n_embd // n_head, injected via ctx)
+        if n_head is not None:
+            n_heads.add(n_head)
         if n_kv_head is not None:
             n_kv_heads.add(n_kv_head)
         kv_slot = p.get("kv_slot", i)
@@ -109,6 +109,10 @@ def _validate_kv_layout(body, errors):
         produces_kv = p.get("produces_kv", True)
         if not produces_kv and kv_slot is not None and kv_slot >= i:
             errors.append(ConfigError(path, f"kv_slot {kv_slot} does not point at an earlier producer layer"))
+    if len(n_heads) > 1:
+        # head_dim = n_embd // n_head, and n_embd is one global value -- non-uniform n_head is
+        # exactly non-uniform head_dim, which kv_cache_spec() also requires uniform.
+        errors.append(ConfigError("body", f"non-uniform n_head across blocks: {sorted(n_heads)} (KV cache requires uniform head_dim, i.e. uniform n_head)"))
     if len(n_kv_heads) > 1:
         errors.append(ConfigError("body", f"non-uniform n_kv_head across blocks: {sorted(n_kv_heads)} (KV cache requires uniform n_kv_head)"))
     distinct_slots = sorted(set(slots))

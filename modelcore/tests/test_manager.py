@@ -235,3 +235,25 @@ def test_kv_sharing_consumer_without_kv_slot_is_reported(manager):
     report = manager.validate_config(config)
     assert not report.ok
     assert any("explicit kv_slot" in e.message for e in report.errors)
+
+
+def test_non_uniform_n_head_across_blocks_is_reported(manager):
+    """head_dim = n_embd // n_head, and n_embd is one global value, so non-uniform n_head is
+    exactly non-uniform head_dim -- something modelcore.stats.kv_cache_spec() requires uniform
+    (and otherwise only discovers via a raw AssertionError at model-build time, not a clean
+    ValidationReport error). Both n_head values here (2, 4) individually divide n_embd=64 cleanly,
+    so this isolates the cross-block uniformity check from the per-block divisibility check."""
+    blocks = [
+        ComponentSpec("plain_block", {"layer_idx": 0, "n_head": 2, "n_kv_head": 2, "window": -1}),
+        ComponentSpec("plain_block", {"layer_idx": 1, "n_head": 4, "n_kv_head": 2, "window": -1}),
+    ]
+    config = ModelConfig(
+        sequence_len=32, vocab_size=128, n_embd=64,
+        shared={"rope": ComponentSpec("rotary", {"head_dim": 32})},
+        input=ComponentSpec("token_embedding", {"smear": False}),
+        body=ComponentSpec("stack", {"blocks": blocks}),
+        output=ComponentSpec("lm_head", {"softcap": 15}),
+    )
+    report = manager.validate_config(config)
+    assert not report.ok
+    assert any("non-uniform n_head" in e.message for e in report.errors)

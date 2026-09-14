@@ -25,7 +25,7 @@ modelcore/
 │   └── validate.py        validate_config() -- structural + component-owned semantic checks
 ├── catalog.py           component registry: "#type" name -> (cls, needs, validate)
 ├── components/           linear, norm, rope, rotary, attention (incl. cross-layer KV sharing),
-│                         mlp, block, embedding (+smear), unembedding, windows, kv_sharing
+│                         mlp, block, embedding (+smear), unembedding
 ├── composers/             base, stack, backout
 ├── roles.py               parameter-role protocol (optimizer grouping)
 ├── stats.py               FLOPs/param/KV-bytes accounting, ModelStats
