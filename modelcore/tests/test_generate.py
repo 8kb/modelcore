@@ -9,7 +9,8 @@ python -m pytest modelcore/tests/test_generate.py -v
 """
 import torch
 
-from modelcore.generate import sample_next_token
+from modelcore.generate import ToolSpec, collect_batch, generate_with_tools, sample_next_token
+from modelcore.generate import RowState, _advance_row
 
 from modelcore.tests.conftest import FLAVORS, build
 
@@ -63,3 +64,99 @@ def test_decoder_logits_shape_and_step_updates_them(manager):
     assert new_logits is decoder.logits
     assert new_logits.shape == (3, config.vocab_size)
     assert not torch.equal(before, decoder.logits), "step() should advance the cache and change logits"
+
+
+# -----------------------------------------------------------------------------
+# _advance_row: the tool start/end/capture state machine, pure token-id bookkeeping with no model
+# involved -- see generate_with_tools' docstring for why this is split out and directly testable.
+
+TERMINAL = {99}
+START, END, RESULT_START, RESULT_END = 10, 11, 20, 21
+
+
+def _echo_tool(captured):
+    """A ToolSpec.run that just echoes the captured tokens back -- enough to prove routing without
+    needing a real tokenizer/calculator."""
+    return list(captured)
+
+
+def test_advance_row_marks_completed_on_terminal_id():
+    state = RowState([1, 2, 3])
+    _advance_row(state, 99, terminal_ids=TERMINAL, tools=())
+    assert state.completed
+    assert state.current_tokens == [1, 2, 3, 99]
+
+
+def test_advance_row_runs_tool_and_forces_wrapped_result():
+    tool = ToolSpec(START, END, RESULT_START, RESULT_END, run=_echo_tool)
+    state = RowState([])
+    for token in (START, 5, 6, END):
+        _advance_row(state, token, terminal_ids=TERMINAL, tools=[tool])
+    assert state.active_tool is None
+    assert list(state.forced_tokens) == [RESULT_START, 5, 6, RESULT_END]
+
+
+def test_advance_row_tool_returning_none_forces_nothing():
+    tool = ToolSpec(START, END, RESULT_START, RESULT_END, run=lambda captured: None)
+    state = RowState([])
+    for token in (START, 7, END):
+        _advance_row(state, token, terminal_ids=TERMINAL, tools=[tool])
+    assert list(state.forced_tokens) == []
+
+
+def test_advance_row_empty_capture_never_calls_run():
+    calls = []
+    tool = ToolSpec(START, END, RESULT_START, RESULT_END, run=lambda captured: calls.append(captured) or [1])
+    state = RowState([])
+    for token in (START, END):  # end immediately follows start -- nothing captured
+        _advance_row(state, token, terminal_ids=TERMINAL, tools=[tool])
+    assert calls == []
+    assert list(state.forced_tokens) == []
+
+
+def test_advance_row_nested_start_resets_capture():
+    """A second start_id while already inside the tool re-opens it and drops what was captured so
+    far -- matches the two ported originals' if/elif/elif priority (start always wins)."""
+    tool = ToolSpec(START, END, RESULT_START, RESULT_END, run=_echo_tool)
+    state = RowState([])
+    for token in (START, 1, 2, START, 3, END):
+        _advance_row(state, token, terminal_ids=TERMINAL, tools=[tool])
+    assert list(state.forced_tokens) == [RESULT_START, 3, RESULT_END]
+
+
+def test_advance_row_two_tools_start_id_selects_the_right_one():
+    tool_a = ToolSpec(10, 11, 20, 21, run=lambda c: ["a"] + c)
+    tool_b = ToolSpec(30, 31, 40, 41, run=lambda c: ["b"] + c)
+    state = RowState([])
+    for token in (30, 5, 31):
+        _advance_row(state, token, terminal_ids=TERMINAL, tools=[tool_a, tool_b])
+    assert list(state.forced_tokens) == [40, "b", 5, 41]
+
+
+# -----------------------------------------------------------------------------
+# collect_batch
+
+def test_collect_batch_drops_terminal_and_stops_when_all_rows_complete():
+    stream = [
+        ([1, 5], [1, 1]),
+        ([99, 6], [1, 1]),   # row 0 hits terminal and stops accumulating; row 1 keeps going
+        ([0, 99], [0, 1]),   # row 0's forced 0 must be ignored (already completed); row 1 ends
+        ([0, 0], [1, 1]),    # never reached -- both rows completed on the previous step
+    ]
+    results, masks = collect_batch(iter(stream), TERMINAL, prompt_tokens=[7], num_samples=2)
+    assert results == [[7, 1], [7, 5, 6]]
+    assert masks == [[0, 1], [0, 1, 1]]
+
+
+def test_generate_with_tools_respects_max_tokens_with_no_tools(manager):
+    config = FLAVORS["gpt"]()
+    model = build(manager, config)
+    model.eval()
+    prompt = [1, 2, 3]
+    max_tokens = 5
+    stream = list(generate_with_tools(model, manager, prompt, num_samples=2, max_tokens=max_tokens,
+                                       temperature=0.0, terminal_ids=set(), tools=()))
+    assert len(stream) == max_tokens
+    for token_column, token_masks in stream:
+        assert len(token_column) == 2
+        assert token_masks == [1, 1]  # nothing forced -- every step is a real sample

@@ -17,20 +17,25 @@ this document only covers `modelcore` itself.
 modelcore/
 ├── manager.py         ModelManager -- the one entrypoint
 ├── model.py            Model -- the one model class, built from a config tree
-├── generate.py         sample_next_token, generate_naive, Decoder (cached prefill+decode)
+├── generate.py         sample_next_token, generate_naive, Decoder (cached prefill+decode),
+│                        generate_with_tools/ToolSpec/collect_batch (tool-use decode loop)
+├── scaling.py            derive_training_plan -- muP horizon/batch-size/LR-scale derivation
 ├── config/
-│   ├── spec.py            ComponentSpec, ModelConfig, AttentionLayerSpec
+│   ├── spec.py            ComponentSpec, ModelConfig, AttentionLayerSpec, resolve_reference_config
 │   └── validate.py        validate_config() -- structural + component-owned semantic checks
 ├── catalog.py           component registry: "#type" name -> (cls, needs, validate)
 ├── components/           linear, norm, rope, rotary, attention, mlp, block, embedding, unembedding
 ├── composers/             base, stack, backout
 ├── roles.py               parameter-role protocol (optimizer grouping)
 ├── stats.py               FLOPs/param/KV-bytes accounting, ModelStats
-├── store.py               ArtifactStore protocol + FileSystemStore
-├── runtime.py             Runtime (compute dtype, log sink) -- injected, not a global
+├── store.py               ArtifactStore protocol + FileSystemStore (+ read_meta/update_meta,
+│                        last_step)
+├── runtime.py             Runtime (compute dtype, log sink) -- injected, not a global; also
+│                        compute_init/compute_cleanup (device/DDP/seed bring-up) and
+│                        peak_flops/peak_bandwidth (MFU/MBU hardware tables)
 ├── precision/
 │   └── fp8.py              Float8Linear + convert_to_float8_training (ModelManager.enable_fp8)
-├── optim/                  MuonAdamW
+├── optim/                  MuonAdamW, schedules.py (lr_multiplier/muon_momentum)
 ├── kernels/                FA3/SDPA flash-attention interface
 ├── cache.py                KVCache
 └── tests/                  modelcore's own test suite (see "Verifying" below)
@@ -51,6 +56,7 @@ class ModelManager:
     # create
     def create_model(self, config, *, device, seed: int | None = None) -> Model
     def create_optimizer(self, model, hparams: OptimizerHparams | None = None) -> MuonAdamW
+    def apply_schedule(self, optimizer, *, lr_mult=None, muon_momentum=None, muon_weight_decay=None) -> None
 
     # load / save
     def load_model(self, store, *, device, config=None, train: bool = False) -> Model
@@ -284,7 +290,11 @@ directory + step (`model_{step:06d}.pt`, `meta_{step:06d}.json`'s `"model_config
 `optim_{step:06d}_rank{N}.pt`). `write_config` merges into the meta.json's `"model_config"` key
 rather than overwriting the file, since a host application typically writes its own sibling keys
 (`val_bpb`, `user_config`, `tokenizer_fingerprint`, ...) into the same file — each side only ever
-touches the key(s) it owns.
+touches the key(s) it owns. `FileSystemStore.read_meta()`/`update_meta(dict)` give a host the same
+read-merge-write for *its* sibling keys (never touching `"model_config"`), and the module-level
+`last_step(checkpoint_dir)` finds the highest saved step — both are format mechanics a host used to
+reimplement per app; naming/tag policy (which directory, auto-discovery across tags) stays with
+the host.
 
 A store is deliberately narrow and duck-typed (not an ABC) — `ArtifactStore` is a protocol, not a
 base class a caller is required to subclass. This is the seam a host application uses to adapt an
@@ -304,6 +314,44 @@ rather than the other way around, since `modelcore` has zero dependencies on its
 `nanochat.common.COMPUTE_DTYPE`/`COMPUTE_DTYPE_REASON` and `tinylab.runtime.COMPUTE_DTYPE`/
 `COMPUTE_DTYPE_REASON` do exactly this; nanochat's also accepts `NANOCHAT_DTYPE` as a back-compat
 alias for `MODELCORE_DTYPE`).
+
+The same module also holds `compute_init(device_type="cuda", *, seed=42, backend="nccl", log=None)`
+/`compute_cleanup()` (device/seed/DDP bring-up: seeds torch, sets tf32 matmul precision on CUDA,
+inits `torch.distributed` when torchrun's env is present) and `peak_flops(device_name)`/
+`peak_bandwidth(device_name)` (hardcoded per-GPU tables, the MFU/MBU denominators) — not part of
+the injected-`Runtime`-value contract above (no component ever needs a device or a peak-flops
+number), but living here because this is where a host's own runtime-bringup module already lives.
+`compute_init` keeps the 5-tuple return shape `(is_ddp, ddp_rank, ddp_local_rank, ddp_world_size,
+device)` both hosts already unpack, unchanged from before this moved.
+
+## Scaling-law horizon derivation
+
+`modelcore/scaling.py`'s `derive_training_plan(...)` is pure math (no I/O, no model) turning a
+model's scalar stats (`ModelStats.num_scaling_params`, `.flops_per_token`) and its depth-12 muP
+reference model's `num_scaling_params` into a `TrainingPlan`: the training horizon (iterations,
+resolved from an explicit request, a FLOPs budget, or a data:param ratio, in that precedence
+order), an auto-derived batch size (Power Lines' `B ~ D^0.383` scaling, clamped to a power of 2)
+when the caller didn't pin one, and the LR/weight-decay corrections that follow from the batch size
+actually chosen. `B_REF` (the empirically-measured optimal batch size at d12) is a module constant
+but also a `b_ref=` keyword — an empirical measurement, not a derived law, so a caller who
+re-measures it for their own setup isn't stuck with the shipped value. A host's own preset/depth-
+dial layer is what supplies every input; this module never builds a model or reads a config tree.
+
+`modelcore/optim/schedules.py`'s `lr_multiplier`/`muon_momentum` are the per-step schedule shapes
+(linear warmup → hold → linear warmdown; a momentum ramp with its own warmup window) both hosts
+used as their default — kept as plain functions of the step index, easy to replace with a
+different shape entirely. `ModelManager.apply_schedule` is the part that isn't swappable per-host:
+it mutates a `MuonAdamW`'s live `param_groups` (`"lr"` from `"initial_lr"`, and — for `"muon"`-kind
+groups only — `"momentum"`/`"weight_decay"`), which is the same on-disk optimizer format
+`create_optimizer` builds (see "Every parameter needs a declared role" above) — every value passed
+to it is `None`-by-default (a no-op), so a caller can drive only the parts it wants scheduled.
+
+`modelcore.config.spec.resolve_reference_config(resolved_config, ref_depth, expand)` re-expands a
+config's own `ModelConfig.reference` block (`{"preset": name, "kwargs": {...}}`, stamped by a
+host's own preset expander — see "Only concrete, already-decided values" above) at a different
+depth, e.g. the muP d12 reference `derive_training_plan` needs. It takes the host's own
+`expand(preset_name, depth, **kwargs)` as a parameter rather than importing one — this module knows
+nothing about what presets exist, only that `ModelConfig.reference` is its own field.
 
 ## Adding a component, step by step
 
@@ -505,10 +553,21 @@ rather than clobber.
 - `Decoder` — a batch-1 prefill of a prompt, replicated into an `num_samples`-row `KVCache`, then
   stepped one position at a time (`decoder.step(token_column) -> logits`). Reached via
   `ModelManager.new_decoder(model, tokens, *, num_samples=1, max_tokens=None, device=None)`.
+- `generate_with_tools(model, manager, tokens, *, num_samples=1, max_tokens=None, temperature=1.0,
+  top_k=None, seed=42, terminal_ids, tools=())` — the tool-use decode loop built on `Decoder`:
+  forces a row to stop on any id in `terminal_ids`, and recognizes each `ToolSpec(start_id, end_id,
+  result_start_id, result_end_id, run)` in `tools`, calling `run(captured_token_ids)` when a tool's
+  `end_id` is seen and force-injecting the result (wrapped in `result_start_id`/`result_end_id`)
+  when `run` returns tokens (`None` means "inject nothing" — wrong tool usage isn't fatal). Yields
+  `(token_column, token_masks)` per step, same shape as `Decoder`-driven code always produced by
+  hand. `collect_batch(stream, terminal_ids, prompt_tokens, num_samples)` drains such a stream into
+  `(results, masks)` — each a list of `num_samples` token-id lists, terminal tokens excluded.
 
-None of this knows about tokenizers, special tokens, or tool use — a host application layers those
-concerns on top, driving `Decoder` for the actual model-stepping (`nanochat.engine.Engine` and
-`tinylab.engine.Engine` both add a chat-token/calculator state machine around exactly this).
+None of this knows about tokenizers or special-token *names* — a host resolves its own special
+tokens to ids and, for tools, supplies what a captured expression actually evaluates to (`run`);
+`nanochat.engine.Engine`/`tinylab.engine.Engine` are both now thin adapters over exactly this loop,
+each still owning its own `use_calculator` (the `eval()` sandbox) as the one `ToolSpec.run`
+callback — the loop moved, the tool's own logic didn't.
 
 ## Bits-per-byte evaluation
 

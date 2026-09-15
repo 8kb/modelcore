@@ -195,3 +195,21 @@ class ModelConfig:
             adapters=[AdapterSpec.from_dict(a) for a in d.get("adapters", [])],
             frozen=list(d.get("frozen", [])),
         )
+
+
+def resolve_reference_config(resolved_config: "ModelConfig", ref_depth: int, expand) -> "ModelConfig":
+    """The muP scaling-law reference model (modelcore.scaling.derive_training_plan's d_ref) at
+    ref_depth (12), for a config a caller's own depth-dial expander already resolved to
+    `resolved_config`. Moved here from two identical copies (nanochat's
+    architectures/presets.py, tinylab's presets.py) -- both only ever touched
+    ModelConfig.reference, a modelcore-owned field, but need the caller's own preset registry to
+    re-expand it, so `expand` (the caller's own `expand(preset_name, depth, **kwargs)`, e.g.
+    nanochat.architectures.presets.expand) is a required parameter rather than baked in here --
+    this module knows nothing about what presets exist. Every `expand()`-produced config always
+    stamps a `reference` block on its own output (a caller convention, not enforced here), so this
+    works uniformly for any preset."""
+    assert resolved_config.reference is not None, (
+        f"config has no 'reference' block, so its muP scaling-law reference model can't be "
+        f"re-derived automatically at depth {ref_depth}"
+    )
+    return expand(resolved_config.reference["preset"], ref_depth, **resolved_config.reference["kwargs"])

@@ -13,6 +13,7 @@ whoever constructs the store, not to modelcore.
 """
 import json
 import os
+import re
 
 import torch
 
@@ -91,3 +92,40 @@ class FileSystemStore(ArtifactStore):
     def write_optimizer_state(self, state: dict, rank: int = 0) -> None:
         os.makedirs(self.checkpoint_dir, exist_ok=True)
         torch.save(state, self._optim_path(rank))
+
+    def read_meta(self) -> dict:
+        """The full meta_{step:06d}.json dict (including "model_config") -- {} if it doesn't
+        exist yet. A host's own sibling keys (val_bpb, user_config, tokenizer_fingerprint, ...)
+        live in here alongside "model_config"; see update_meta for how a host adds/merges them."""
+        if not os.path.exists(self._meta_path()):
+            return {}
+        with open(self._meta_path(), "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    def update_meta(self, updates: dict) -> None:
+        """Merges `updates` into meta_{step:06d}.json, creating it if needed -- the host-side
+        mirror of write_config's own read-merge-write (see that method and the class docstring).
+        Never touches the "model_config" key even if `updates` has one -- that key is write_config's
+        alone, so a host merging its own sibling keys can't accidentally clobber it (or vice versa,
+        write_config can't clobber a host's keys, since it only ever touches "model_config")."""
+        os.makedirs(self.checkpoint_dir, exist_ok=True)
+        meta = self.read_meta()
+        meta.update({k: v for k, v in updates.items() if k != "model_config"})
+        with open(self._meta_path(), "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=2)
+
+
+def last_step(checkpoint_dir: str) -> int:
+    """The highest step number among checkpoint_dir's model_<step>.pt files. Raises
+    FileNotFoundError if there aren't any -- naming/tag policy (which directory, auto-discovery
+    across tags) stays with the caller; this only knows the model_{step:06d}.pt naming convention
+    FileSystemStore itself writes."""
+    pattern = re.compile(r"model_(\d+)\.pt$")
+    steps = []
+    for filename in os.listdir(checkpoint_dir):
+        match = pattern.search(filename)
+        if match:
+            steps.append(int(match.group(1)))
+    if not steps:
+        raise FileNotFoundError(f"No checkpoints found in {checkpoint_dir}")
+    return max(steps)

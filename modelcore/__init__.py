@@ -17,21 +17,30 @@ import modelcore.components  # noqa: F401 -- import for @register_component side
 import modelcore.composers  # noqa: F401 -- import for @register_component side effects
 
 from modelcore.cache import KVCache
-from modelcore.config.spec import AdapterSpec, AttentionLayerSpec, ComponentSpec, ModelConfig
+from modelcore.config.spec import (
+    AdapterSpec, AttentionLayerSpec, ComponentSpec, ModelConfig, resolve_reference_config,
+)
 from modelcore.errors import ConfigError, ValidationReport
-from modelcore.generate import Decoder, generate_naive, sample_next_token
+from modelcore.generate import Decoder, ToolSpec, collect_batch, generate_naive, generate_with_tools, sample_next_token
 from modelcore.manager import Fp8Report, ModelManager, OptimizerHparams
 from modelcore.model import Model
-from modelcore.runtime import DEFAULT_RUNTIME, Runtime
+from modelcore.runtime import (
+    DEFAULT_RUNTIME, Runtime, autodetect_device_type, compute_cleanup, compute_init,
+    peak_bandwidth, peak_flops,
+)
+from modelcore.scaling import TrainingPlan, derive_training_plan
 from modelcore.stats import ModelStats
-from modelcore.store import ArtifactStore, FileSystemStore
+from modelcore.store import ArtifactStore, FileSystemStore, last_step
 
 __all__ = [
     "ModelManager", "OptimizerHparams", "Fp8Report",
-    "ModelConfig", "ComponentSpec", "AttentionLayerSpec", "AdapterSpec",
+    "ModelConfig", "ComponentSpec", "AttentionLayerSpec", "AdapterSpec", "resolve_reference_config",
     "Model", "ModelStats", "KVCache",
     "Decoder", "generate_naive", "sample_next_token",
+    "ToolSpec", "generate_with_tools", "collect_batch",
     "ConfigError", "ValidationReport",
-    "ArtifactStore", "FileSystemStore",
-    "Runtime", "DEFAULT_RUNTIME",
+    "ArtifactStore", "FileSystemStore", "last_step",
+    "Runtime", "DEFAULT_RUNTIME", "compute_init", "compute_cleanup", "autodetect_device_type",
+    "peak_flops", "peak_bandwidth",
+    "TrainingPlan", "derive_training_plan",
 ]

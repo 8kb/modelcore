@@ -127,6 +127,24 @@ class ModelManager:
             group["initial_lr"] = group["lr"]
         return optimizer
 
+    def apply_schedule(self, optimizer: MuonAdamW, *, lr_mult: float | None = None,
+                        muon_momentum: float | None = None, muon_weight_decay: float | None = None) -> None:
+        """Mutates every param group's live "lr" (and, for "muon"-kind groups only, "momentum"/
+        "weight_decay") for this step -- the values themselves come from wherever the caller wants
+        (see modelcore.optim.schedules for the shapes both nanochat and tinylab use as their
+        default). This is a ModelManager method, not a free function, because it reads
+        "initial_lr"/"kind" -- create_optimizer's own on-disk param-group layout (see that
+        docstring) -- rather than being schedule-shape-agnostic; every arg left None is a no-op
+        for that value."""
+        for group in optimizer.param_groups:
+            if lr_mult is not None:
+                group["lr"] = group["initial_lr"] * lr_mult
+            if group.get("kind") == "muon":
+                if muon_momentum is not None:
+                    group["momentum"] = muon_momentum
+                if muon_weight_decay is not None:
+                    group["weight_decay"] = muon_weight_decay
+
     # -- load --
 
     def load_model(self, store, *, device, config: ModelConfig | None = None, train: bool = False) -> Model:
