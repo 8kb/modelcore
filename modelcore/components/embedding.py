@@ -4,7 +4,6 @@ import torch.nn as nn
 from modelcore.catalog import register_component
 from modelcore.components.contracts import BaseEmbedding
 from modelcore.components.linear import Linear
-from modelcore.components.norm import norm
 from modelcore.runtime import DEFAULT_RUNTIME
 
 
@@ -50,15 +49,16 @@ class Smear(nn.Module):
         return x
 
 
-@register_component("token_embedding", needs=("padded_vocab_size", "n_embd", "runtime"))
+@register_component("token_embedding", needs=("padded_vocab_size", "n_embd", "norm", "runtime"))
 class TokenEmbedding(BaseEmbedding):
     """wte lookup + compute-dtype cast + norm() + optional Smear. Token ids -> residual-stream
     activations, ready for the trunk."""
     PARAM_ROLES = {"wte": "embedding"}
 
-    def __init__(self, padded_vocab_size, n_embd, smear=True, runtime=None):
+    def __init__(self, padded_vocab_size, n_embd, norm, smear, runtime=None):
         super().__init__()
         self.runtime = runtime or DEFAULT_RUNTIME
+        self.norm = norm
         self.wte = nn.Embedding(padded_vocab_size, n_embd)
         self.smear = Smear() if smear else None
 
@@ -76,7 +76,7 @@ class TokenEmbedding(BaseEmbedding):
     def forward(self, idx, kv_cache=None):
         x = self.wte(idx)
         x = x.to(self.runtime.compute_dtype)  # ensure activations are in compute dtype (no-op usually, but active for fp16)
-        x = norm(x)
+        x = self.norm(x)
         if self.smear is not None:
             x = self.smear(x, kv_cache)
         return x

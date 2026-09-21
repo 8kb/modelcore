@@ -19,7 +19,7 @@ class RotaryEmbedding(nn.Module):
     checkpoint), which is why ModelManager.load_model() calls init_weights() even when loading a
     checkpoint."""
 
-    def __init__(self, head_dim, sequence_len, over_compute=10, runtime=None):
+    def __init__(self, head_dim, sequence_len, over_compute, runtime=None):
         super().__init__()
         self.head_dim = head_dim
         self.runtime = runtime or DEFAULT_RUNTIME

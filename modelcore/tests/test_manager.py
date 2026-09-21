@@ -13,7 +13,7 @@ from modelcore import ComponentSpec, ModelConfig, OptimizerHparams
 from modelcore.components.linear import Linear
 from modelcore.roles import collect_param_roles
 
-from modelcore.tests.conftest import FLAVORS, build
+from modelcore.tests.conftest import FLAVORS, RMS_NORM, build
 
 
 # -----------------------------------------------------------------------------
@@ -177,13 +177,14 @@ def test_validate_config_reports_every_error_not_just_the_first(manager):
         ComponentSpec("gpt_block", {
             "layer_idx": 0, "n_head": 3, "n_kv_head": 2, "window": -5, "has_value_embed": False,
             "resid_lambda_init": 1.0, "x0_lambda_init": 0.0,
+            "mlp": ComponentSpec("mlp", {"activation": "relu2", "hidden_dim": 256}),
         }),
     ]
     config = ModelConfig(
-        sequence_len=32, vocab_size=128, n_embd=64,
-        shared={"rope": ComponentSpec("rotary", {"head_dim": 32})},
+        sequence_len=32, vocab_size=128, n_embd=64, pad_vocab_size_to=64, template="base",
+        shared={"rope": ComponentSpec("rotary", {"head_dim": 32, "over_compute": 10}), "norm": RMS_NORM()},
         input=ComponentSpec("token_embedding", {"smear": True}),
-        body=ComponentSpec("backout", {"backout_layer": 0, "blocks": bad_blocks}),
+        body=ComponentSpec("backout", {"backout_layer": 0, "backout_lambda_init": 0.2, "blocks": bad_blocks}),
         output=ComponentSpec("lm_head", {"softcap": 15}),
     )
     report = manager.validate_config(config)
@@ -196,8 +197,8 @@ def test_validate_config_reports_every_error_not_just_the_first(manager):
 
 def test_validate_config_reports_unknown_component_type(manager):
     config = ModelConfig(
-        sequence_len=32, vocab_size=128, n_embd=64,
-        shared={}, input=ComponentSpec("nonexistent_embedding", {}),
+        sequence_len=32, vocab_size=128, n_embd=64, pad_vocab_size_to=64, template="base",
+        shared={"norm": RMS_NORM()}, input=ComponentSpec("nonexistent_embedding", {}),
         body=ComponentSpec("stack", {"blocks": []}),
         output=ComponentSpec("lm_head", {"softcap": 15}),
     )
@@ -207,7 +208,7 @@ def test_validate_config_reports_unknown_component_type(manager):
 
 
 def test_validate_config_reports_missing_input_body_output(manager):
-    config = ModelConfig(sequence_len=32, vocab_size=128, n_embd=64)
+    config = ModelConfig(sequence_len=32, vocab_size=128, n_embd=64, pad_vocab_size_to=64, template="base")
     report = manager.validate_config(config)
     assert not report.ok
     paths = {e.path for e in report.errors}
@@ -215,19 +216,19 @@ def test_validate_config_reports_missing_input_body_output(manager):
 
 
 def test_create_model_raises_on_invalid_config(manager):
-    config = ModelConfig(sequence_len=32, vocab_size=128, n_embd=64)  # no input/body/output
+    config = ModelConfig(sequence_len=32, vocab_size=128, n_embd=64, pad_vocab_size_to=64, template="base")  # no input/body/output
     with pytest.raises(ValueError):
         manager.create_model(config, device=torch.device("cpu"))
 
 
 def test_kv_sharing_consumer_without_kv_slot_is_reported(manager):
     blocks = [
-        ComponentSpec("plain_block", {"layer_idx": 0, "n_head": 2, "n_kv_head": 2, "window": -1}),
-        ComponentSpec("plain_block", {"layer_idx": 1, "n_head": 2, "n_kv_head": 2, "window": -1, "produces_kv": False}),
+        ComponentSpec("plain_block", {"layer_idx": 0, "n_head": 2, "n_kv_head": 2, "window": -1, "kv_slot": None, "produces_kv": True, "mlp": ComponentSpec("gated_mlp", {"activation": "silu", "hidden_dim": 256})}),
+        ComponentSpec("plain_block", {"layer_idx": 1, "n_head": 2, "n_kv_head": 2, "window": -1, "kv_slot": None, "produces_kv": False, "mlp": ComponentSpec("gated_mlp", {"activation": "silu", "hidden_dim": 256})}),
     ]
     config = ModelConfig(
-        sequence_len=32, vocab_size=128, n_embd=64,
-        shared={"rope": ComponentSpec("rotary", {"head_dim": 32})},
+        sequence_len=32, vocab_size=128, n_embd=64, pad_vocab_size_to=64, template="base",
+        shared={"rope": ComponentSpec("rotary", {"head_dim": 32, "over_compute": 10}), "norm": RMS_NORM()},
         input=ComponentSpec("token_embedding", {"smear": False}),
         body=ComponentSpec("stack", {"blocks": blocks}),
         output=ComponentSpec("lm_head", {"softcap": 15}),
@@ -244,12 +245,12 @@ def test_non_uniform_n_head_across_blocks_is_reported(manager):
     ValidationReport error). Both n_head values here (2, 4) individually divide n_embd=64 cleanly,
     so this isolates the cross-block uniformity check from the per-block divisibility check."""
     blocks = [
-        ComponentSpec("plain_block", {"layer_idx": 0, "n_head": 2, "n_kv_head": 2, "window": -1}),
-        ComponentSpec("plain_block", {"layer_idx": 1, "n_head": 4, "n_kv_head": 2, "window": -1}),
+        ComponentSpec("plain_block", {"layer_idx": 0, "n_head": 2, "n_kv_head": 2, "window": -1, "kv_slot": None, "produces_kv": True, "mlp": ComponentSpec("gated_mlp", {"activation": "silu", "hidden_dim": 256})}),
+        ComponentSpec("plain_block", {"layer_idx": 1, "n_head": 4, "n_kv_head": 2, "window": -1, "kv_slot": None, "produces_kv": True, "mlp": ComponentSpec("gated_mlp", {"activation": "silu", "hidden_dim": 256})}),
     ]
     config = ModelConfig(
-        sequence_len=32, vocab_size=128, n_embd=64,
-        shared={"rope": ComponentSpec("rotary", {"head_dim": 32})},
+        sequence_len=32, vocab_size=128, n_embd=64, pad_vocab_size_to=64, template="base",
+        shared={"rope": ComponentSpec("rotary", {"head_dim": 32, "over_compute": 10}), "norm": RMS_NORM()},
         input=ComponentSpec("token_embedding", {"smear": False}),
         body=ComponentSpec("stack", {"blocks": blocks}),
         output=ComponentSpec("lm_head", {"softcap": 15}),

@@ -11,9 +11,9 @@ import torch
 import torch.nn.functional as F
 
 from modelcore.components.rope import apply_rotary_emb, precompute_rotary_embeddings
-from modelcore.components.norm import norm
+from modelcore.components.norm import LayerNorm, RMSNorm
 from modelcore.components.linear import Linear
-from modelcore.components.mlp import SwiGLUMLP
+from modelcore.components.mlp import ACTIVATIONS, MLP, GatedMLP
 from modelcore.components.embedding import Smear
 from modelcore.components.unembedding import LMHead
 from modelcore.components.rotary import RotaryEmbedding
@@ -57,9 +57,23 @@ def test_apply_rotary_emb_relative_position_invariance():
 
 def test_norm_gives_unit_rms():
     x = torch.randn(4, 8, 16) * 5.0 + 3.0
-    y = norm(x)
+    y = RMSNorm(eps=None)(x)
     rms = y.pow(2).mean(dim=-1).sqrt()
     assert torch.allclose(rms, torch.ones_like(rms), atol=1e-4)
+
+
+def test_rms_norm_eps_none_is_torchs_own_default():
+    """eps=None is what every pre-configurable-norm model used (F.rms_norm's unset eps), so the
+    v1->v2 converter's `"eps": null` must reproduce it bit for bit."""
+    x = torch.randn(3, 5, 16)
+    assert torch.equal(RMSNorm(eps=None)(x), F.rms_norm(x, (16,)))
+
+
+def test_layer_norm_zero_mean_unit_var():
+    x = torch.randn(4, 8, 16) * 5.0 + 3.0
+    y = LayerNorm(eps=1e-5)(x)
+    assert torch.allclose(y.mean(dim=-1), torch.zeros(4, 8), atol=1e-4)
+    assert torch.allclose(y.var(dim=-1, unbiased=False), torch.ones(4, 8), atol=1e-3)
 
 
 # -----------------------------------------------------------------------------
@@ -77,13 +91,39 @@ def test_linear_casts_activations_but_keeps_fp32_master_weight():
 # -----------------------------------------------------------------------------
 # MLP variants
 
-def test_swiglu_mlp_shape_and_finite():
-    mlp = SwiGLUMLP(n_embd=32)
+def test_gated_mlp_shape_and_finite():
+    mlp = GatedMLP(n_embd=32, activation="silu", hidden_dim=96)
     mlp.init_weights()
     x = torch.randn(2, 5, 32)
     y = mlp(x)
     assert y.shape == x.shape
     assert torch.isfinite(y).all()
+
+
+def test_mlp_inner_width_is_whatever_the_config_says():
+    """hidden_dim is free -- not 4 * n_embd, and not rounded to anything."""
+    for cls in (MLP, GatedMLP):
+        mlp = cls(n_embd=32, activation="silu", hidden_dim=50)
+        assert mlp.hidden_dim == 50
+        first = mlp.c_fc if cls is MLP else mlp.gate_proj
+        last = mlp.c_proj if cls is MLP else mlp.down_proj
+        assert first.weight.shape == (50, 32) and last.weight.shape == (32, 50)
+
+
+def test_mlp_activation_is_selectable():
+    """Same weights, different activation -> different output; and relu2 is exactly relu(x)^2."""
+    torch.manual_seed(0)
+    x = torch.randn(2, 5, 32)
+    outs = {}
+    for name in ACTIVATIONS:
+        mlp = MLP(n_embd=32, activation=name, hidden_dim=64)
+        torch.manual_seed(1)
+        torch.nn.init.uniform_(mlp.c_fc.weight, -0.3, 0.3)
+        torch.nn.init.uniform_(mlp.c_proj.weight, -0.3, 0.3)  # nonzero, so the activation is visible
+        outs[name] = mlp(x)
+    assert len({o.flatten()[0].item() for o in outs.values()}) == len(ACTIVATIONS)
+    z = torch.randn(7)
+    assert torch.equal(ACTIVATIONS["relu2"](z), F.relu(z).square())
 
 
 # -----------------------------------------------------------------------------
@@ -135,7 +175,7 @@ def test_smear_prefill_matches_full_sequence_and_caches_last_position():
 
 def test_lm_head_softcap_bounds_logits_and_crops_vocab():
     n_embd, vocab_size, padded = 8, 20, 32
-    head = LMHead(n_embd, vocab_size, padded, softcap=15)
+    head = LMHead(n_embd, vocab_size, padded, RMSNorm(eps=None), softcap=15)
     torch.manual_seed(0)
     torch.nn.init.normal_(head.lm_head.weight, mean=0.0, std=100.0)  # force large pre-softcap logits
     x = torch.randn(2, 3, n_embd) * 50
@@ -146,7 +186,7 @@ def test_lm_head_softcap_bounds_logits_and_crops_vocab():
 
 def test_lm_head_loss_path_matches_manual_cross_entropy():
     n_embd, vocab_size, padded = 8, 20, 32
-    head = LMHead(n_embd, vocab_size, padded)
+    head = LMHead(n_embd, vocab_size, padded, RMSNorm(eps=None), softcap=15)
     head.init_weights()
     x = torch.randn(2, 3, n_embd)
     targets = torch.randint(0, vocab_size, (2, 3))
@@ -159,7 +199,7 @@ def test_lm_head_loss_path_matches_manual_cross_entropy():
 def test_lm_head_tied_weight_shares_storage_and_declares_no_role():
     n_embd, vocab_size, padded = 8, 20, 32
     shared = torch.nn.Parameter(torch.randn(padded, n_embd))
-    head = LMHead(n_embd, vocab_size, padded, weight=shared)
+    head = LMHead(n_embd, vocab_size, padded, RMSNorm(eps=None), softcap=15, weight=shared)
     assert head.lm_head.weight is shared
     assert head.param_roles() == {}
 
@@ -169,7 +209,7 @@ def test_lm_head_tied_weight_shares_storage_and_declares_no_role():
 
 def test_rotary_embedding_offset_matches_manual_slice():
     head_dim, seq_len = 8, 16
-    rope = RotaryEmbedding(head_dim, seq_len)
+    rope = RotaryEmbedding(head_dim, seq_len, over_compute=10)
     rope.init_weights()
     T0, T = 5, 4
     q = torch.randn(1, T, 2, head_dim)
@@ -187,7 +227,7 @@ def test_rotary_embedding_offset_matches_manual_slice():
 
 def test_rotary_embedding_no_cache_uses_zero_offset():
     head_dim, seq_len = 8, 16
-    rope = RotaryEmbedding(head_dim, seq_len)
+    rope = RotaryEmbedding(head_dim, seq_len, over_compute=10)
     rope.init_weights()
     q = torch.randn(1, 3, 2, head_dim)
     k = torch.randn(1, 3, 2, head_dim)

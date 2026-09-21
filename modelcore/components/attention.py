@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 
 from modelcore.components.linear import Linear
-from modelcore.components.norm import norm
 from modelcore.config.spec import AttentionLayerSpec
 from modelcore.kernels.flash_attn import flash_attn
 from modelcore.runtime import DEFAULT_RUNTIME
@@ -36,7 +35,7 @@ class CausalSelfAttention(nn.Module):
     per-layer policy."""
     PARAM_ROLES = {"value_embed": "value_embedding"}
 
-    def __init__(self, n_embd, n_head, n_kv_head, layer_idx, window, rope, padded_vocab_size, has_value_embed,
+    def __init__(self, n_embd, n_head, n_kv_head, layer_idx, window, rope, norm, padded_vocab_size, has_value_embed,
                  kv_slot=None, produces_kv=True, runtime=None):
         super().__init__()
         assert produces_kv or not has_value_embed, "a KV-sharing consumer layer cannot have its own value embedding"
@@ -52,6 +51,7 @@ class CausalSelfAttention(nn.Module):
         assert n_kv_head <= n_head and n_head % n_kv_head == 0
         self.window = window
         self.rope = rope
+        self.norm = norm  # shared config-selected norm, used for QK-norm
         self.c_q = Linear(n_embd, n_head * self.head_dim, bias=False)
         self.c_k = Linear(n_embd, n_kv_head * self.head_dim, bias=False) if produces_kv else None
         self.c_v = Linear(n_embd, n_kv_head * self.head_dim, bias=False) if produces_kv else None
@@ -99,7 +99,7 @@ class CausalSelfAttention(nn.Module):
 
             # Apply Rotary Embeddings to queries and keys to get relative positional encoding
             q, k = self.rope(q, k, kv_cache)
-            q, k = norm(q), norm(k)  # QK norm
+            q, k = self.norm(q), self.norm(k)  # QK norm
             q = q * 1.2  # sharper attention (split scale between Q and K), TODO think through better
             k = k * 1.2
 
@@ -110,7 +110,7 @@ class CausalSelfAttention(nn.Module):
             # it was already RoPE'd/normed/scaled by the producer, so only q needs that treatment.
             k, v = kv_bus[self.kv_slot]
             q = self.rope.apply_to_q(q, kv_cache)
-            q = norm(q)
+            q = self.norm(q)
             q = q * 1.2
 
         # Flash Attention (FA3 or SDPA fallback)

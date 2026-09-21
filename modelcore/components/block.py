@@ -4,8 +4,6 @@ import torch.nn as nn
 from modelcore.catalog import register_component
 from modelcore.components.attention import CausalSelfAttention
 from modelcore.components.contracts import BaseBlock
-from modelcore.components.mlp import MLP, SwiGLUMLP
-from modelcore.components.norm import norm
 
 
 def _validate_attention_shape(params, ctx):
@@ -44,22 +42,24 @@ def _validate_plain_block(params, ctx):
     return errors
 
 
-@register_component("gpt_block", needs=("n_embd", "padded_vocab_size", "rope", "runtime"), validate=_validate_gpt_block)
+@register_component("gpt_block", needs=("n_embd", "padded_vocab_size", "rope", "norm", "runtime"), validate=_validate_gpt_block)
 class Block(BaseBlock):
-    """CausalSelfAttention + MLP, plus the per-layer resid/x0-lambda residual mixing (inspired by
+    """CausalSelfAttention + an MLP, plus the per-layer resid/x0-lambda residual mixing (inspired by
     modded-nanogpt): resid_lambda scales the residual stream at this layer (init ~1.0 = neutral),
-    x0_lambda blends the initial embedding back in (init ~0.0 = disabled). has_value_embed and the
-    resid/x0-lambda init values are already-decided, concrete choices made once outside modelcore
-    when a config tree is materialized -- this module has no policy of its own about which layers
-    get which; it only applies whatever it's given."""
+    x0_lambda blends the initial embedding back in (init ~0.0 = disabled). has_value_embed, the
+    resid/x0-lambda init values, and the `mlp` (a nested component spec: which nonlinearity, what
+    inner width) are already-decided, concrete choices made once outside modelcore when a config
+    tree is materialized -- this module has no policy of its own about which layers get which; it
+    only applies whatever it's given. The norm is the config's shared one (`shared.norm`)."""
     PARAM_ROLES = {"resid_lambda": "resid_scalar", "x0_lambda": "x0_scalar"}
 
-    def __init__(self, n_embd, n_head, n_kv_head, layer_idx, window, rope, padded_vocab_size,
-                 resid_lambda_init, x0_lambda_init, has_value_embed, runtime=None):
+    def __init__(self, n_embd, n_head, n_kv_head, layer_idx, window, rope, norm, padded_vocab_size,
+                 resid_lambda_init, x0_lambda_init, has_value_embed, mlp, runtime=None):
         super().__init__()
-        self.attn = CausalSelfAttention(n_embd, n_head, n_kv_head, layer_idx, window, rope, padded_vocab_size,
+        self.attn = CausalSelfAttention(n_embd, n_head, n_kv_head, layer_idx, window, rope, norm, padded_vocab_size,
                                          has_value_embed, runtime=runtime)
-        self.mlp = MLP(n_embd)
+        self.norm = norm
+        self.mlp = mlp
         self.resid_lambda = nn.Parameter(torch.empty(()))  # fake init, real init in init_weights()
         self.x0_lambda = nn.Parameter(torch.empty(()))     # fake init, real init in init_weights()
         self._resid_lambda_init = resid_lambda_init
@@ -77,30 +77,33 @@ class Block(BaseBlock):
 
     def forward(self, x, x0, idx, kv_cache, kv_bus=None, doc_args=None):
         x = self.resid_lambda * x + self.x0_lambda * x0
-        x = x + self.attn(norm(x), idx, kv_cache, kv_bus, doc_args)
-        x = x + self.mlp(norm(x))
+        x = x + self.attn(self.norm(x), idx, kv_cache, kv_bus, doc_args)
+        x = x + self.mlp(self.norm(x))
         return x
 
 
-@register_component("plain_block", needs=("n_embd", "padded_vocab_size", "rope", "runtime"), validate=_validate_plain_block)
+@register_component("plain_block", needs=("n_embd", "padded_vocab_size", "rope", "norm", "runtime"), validate=_validate_plain_block)
 class PlainBlock(BaseBlock):
     """Plain pre-norm residual block: x = x + attn(norm(x)); x = x + mlp(norm(x)). No per-layer
     resid/x0-lambda mixing, no value embeddings, no smear/backout -- unlike Block above, this is a
     deliberately boring baseline. Reuses CausalSelfAttention unmodified (GQA/RoPE/QK-norm are not
-    architecture-specific tricks); only the MLP (SwiGLU) and the absence of lambda mixing differ.
-    kv_slot/produces_kv pass straight through to CausalSelfAttention (both default to today's
-    one-slot-per-layer behavior) so this block also serves cross-layer KV sharing without a fork.
+    architecture-specific tricks); only the absence of lambda mixing differs -- the MLP is whatever
+    the config's nested `mlp` spec says, exactly as for Block.
+    kv_slot/produces_kv are stated explicitly (kv_slot=None means "own slot at my layer_idx") and
+    pass straight through to CausalSelfAttention, so this block also serves cross-layer KV sharing
+    without a fork.
 
     No PARAM_ROLES declaration needed: attn's matrices default to role "matrix" via Linear, and
-    mlp (SwiGLUMLP) is the same. A KV-sharing consumer block (produces_kv=False) simply has fewer
-    Linear submodules -- nothing to declare either way."""
+    the mlp components are the same. A KV-sharing consumer block (produces_kv=False) simply has
+    fewer Linear submodules -- nothing to declare either way."""
 
-    def __init__(self, n_embd, n_head, n_kv_head, layer_idx, window, rope, padded_vocab_size,
-                 kv_slot=None, produces_kv=True, runtime=None):
+    def __init__(self, n_embd, n_head, n_kv_head, layer_idx, window, rope, norm, padded_vocab_size,
+                 kv_slot, produces_kv, mlp, runtime=None):
         super().__init__()
-        self.attn = CausalSelfAttention(n_embd, n_head, n_kv_head, layer_idx, window, rope, padded_vocab_size,
+        self.attn = CausalSelfAttention(n_embd, n_head, n_kv_head, layer_idx, window, rope, norm, padded_vocab_size,
                                          has_value_embed=False, kv_slot=kv_slot, produces_kv=produces_kv, runtime=runtime)
-        self.mlp = SwiGLUMLP(n_embd)
+        self.norm = norm
+        self.mlp = mlp
 
     @torch.no_grad()
     def init_weights(self):
@@ -113,6 +116,6 @@ class PlainBlock(BaseBlock):
     def forward(self, x, x0, idx, kv_cache, kv_bus=None, doc_args=None):
         # x0 is part of the BaseBlock contract (see modelcore/components/contracts.py) but unused
         # here -- this topology has no x0 residual.
-        x = x + self.attn(norm(x), idx, kv_cache, kv_bus, doc_args)
-        x = x + self.mlp(norm(x))
+        x = x + self.attn(self.norm(x), idx, kv_cache, kv_bus, doc_args)
+        x = x + self.mlp(self.norm(x))
         return x

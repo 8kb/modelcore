@@ -2,15 +2,51 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from modelcore.catalog import register_component
 from modelcore.components.linear import Linear
 
+# Activation name -> function. The name is what a config says; keeping the table here (rather than
+# in each class) is what makes "which nonlinearity" a config choice instead of a class choice.
+def _relu2(x):
+    return F.relu(x).square()
 
+
+ACTIVATIONS = {
+    "relu2": _relu2,
+    "relu": F.relu,
+    "gelu": F.gelu,
+    "silu": F.silu,
+}
+PLAIN_ACTIVATIONS = ("relu2", "relu", "gelu", "silu")
+GATED_ACTIVATIONS = ("silu", "gelu", "relu")
+
+
+def _validator(allowed):
+    def validate(params, ctx):
+        errors = []
+        activation = params.get("activation")
+        if activation not in allowed:
+            errors.append(f"activation must be one of {list(allowed)}, got {activation!r}")
+        hidden_dim = params.get("hidden_dim")
+        if not isinstance(hidden_dim, int) or isinstance(hidden_dim, bool) or hidden_dim <= 0:
+            errors.append(f"hidden_dim must be a positive integer, got {hidden_dim!r}")
+        return errors
+    return validate
+
+
+@register_component("mlp", needs=("n_embd",), validate=_validator(PLAIN_ACTIVATIONS))
 class MLP(nn.Module):
-    def __init__(self, n_embd):
+    """c_proj(act(c_fc(x))). Both `activation` and `hidden_dim` are stated by the config -- there
+    is no 4 * n_embd here: the rule that used to produce that number lives in whatever host layer
+    materializes the tree (a config carries only concrete values, never a derivation rule)."""
+
+    def __init__(self, n_embd, activation, hidden_dim):
         super().__init__()
         self.n_embd = n_embd
-        self.c_fc = Linear(n_embd, 4 * n_embd, bias=False)
-        self.c_proj = Linear(4 * n_embd, n_embd, bias=False)
+        self.hidden_dim = hidden_dim
+        self.act = ACTIVATIONS[activation]
+        self.c_fc = Linear(n_embd, hidden_dim, bias=False)
+        self.c_proj = Linear(hidden_dim, n_embd, bias=False)
 
     @torch.no_grad()
     def init_weights(self):
@@ -20,26 +56,25 @@ class MLP(nn.Module):
 
     def forward(self, x):
         x = self.c_fc(x)
-        x = F.relu(x).square()
+        x = self.act(x)
         x = self.c_proj(x)
         return x
 
 
-class SwiGLUMLP(nn.Module):
-    """Llama-style gated MLP: two parallel projections (gate, up) combined via SiLU-gating, then
-    projected back down. hidden_dim follows the standard Llama derivation: 2/3 of the usual 4x
-    expansion (to keep matmul FLOPs roughly matched to a plain 4x MLP despite the extra gate
-    projection), rounded up to a multiple of multiple_of for clean tiling.
+@register_component("gated_mlp", needs=("n_embd",), validate=_validator(GATED_ACTIVATIONS))
+class GatedMLP(nn.Module):
+    """Gated MLP (SwiGLU when activation="silu"): two parallel projections (gate, up) combined as
+    act(gate(x)) * up(x), then projected back down. hidden_dim is stated by the config, not derived
+    -- the Llama rule (2/3 of a 4x expansion, rounded up to a multiple) is a host-layer derivation.
 
     All three projections are modelcore.components.linear.Linear, so they default to
     PARAM_ROLES role "matrix" (see modelcore.roles) with no declaration needed here."""
 
-    def __init__(self, n_embd, multiple_of=256):
+    def __init__(self, n_embd, activation, hidden_dim):
         super().__init__()
         self.n_embd = n_embd
-        hidden_dim = int(2 * (4 * n_embd) / 3)
-        hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
         self.hidden_dim = hidden_dim
+        self.act = ACTIVATIONS[activation]
         self.gate_proj = Linear(n_embd, hidden_dim, bias=False)
         self.up_proj = Linear(n_embd, hidden_dim, bias=False)
         self.down_proj = Linear(hidden_dim, n_embd, bias=False)
@@ -52,4 +87,4 @@ class SwiGLUMLP(nn.Module):
         torch.nn.init.zeros_(self.down_proj.weight)  # projection back down starts at zero, like GPT's mlp.c_proj
 
     def forward(self, x):
-        return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
+        return self.down_proj(self.act(self.gate_proj(x)) * self.up_proj(x))

@@ -22,6 +22,7 @@ modelcore/
 ├── scaling.py            derive_training_plan -- muP horizon/batch-size/LR-scale derivation
 ├── config/
 │   ├── spec.py            ComponentSpec, ModelConfig, AttentionLayerSpec, resolve_reference_config
+│   ├── upgrade.py         upgrade_v1_to_v2 -- the only place a default value may be supplied
 │   └── validate.py        validate_config() -- structural + component-owned semantic checks
 ├── catalog.py           component registry: "#type" name -> (cls, needs, validate)
 ├── components/           linear, norm, rope, rotary, attention, mlp, block, embedding, unembedding
@@ -99,32 +100,107 @@ There is exactly one config shape `modelcore` understands (`modelcore/config/spe
 class ComponentSpec:
     type: str            # the catalog's "#type" name
     params: dict          # already-concrete constructor kwargs; may nest more ComponentSpecs
+    comments: dict        # this spec's `_`-prefixed keys -- never in params
 
-@dataclass
+@dataclass(kw_only=True)
 class ModelConfig:
-    sequence_len: int
+    sequence_len: int              # the MAXIMUM length trained/allocated for -- not architecture
     vocab_size: int
     n_embd: int                    # the only truly global, uniform-across-layers value
-    pad_vocab_size_to: int = 64
+    pad_vocab_size_to: int
+    template: str                  # how the model is talked to: "base" | "nanochat" (see below)
     reference: dict | None = None  # optional provenance: {"preset": name, "kwargs": {...}}
-    shared: dict = {}              # name -> ComponentSpec, e.g. {"rope": ...}
+    shared: dict = {}              # name -> ComponentSpec, e.g. {"rope": ..., "norm": ...}
     input: ComponentSpec | None = None    # embedding
     body: ComponentSpec | None = None     # the composer (a stack of blocks, or nested composers)
     output: ComponentSpec | None = None   # unembedding
+    meta: dict = {}                # free-form, host-owned, never interpreted
+    tokenizer: dict | None = None  # opaque descriptor of the tokenizer the model expects
+    comments: dict = {}            # top-level `_` keys
 ```
 
-Every component — embedding, block, unembedding, composer, a shared thing like RoPE — is one
-`ComponentSpec`: its type under a `"#type"` key, already-concrete constructor kwargs as siblings.
-A composer is a component like any other; its per-layer block list is just one of its own params
-(conventionally `"blocks"`), so nothing in this schema privileges "a stack of blocks" — a composer
-with several block lists, or one nesting another composer, needs no schema change.
-`ModelConfig.n_layer` is a derived property (`_count_blocks` sums every `"blocks"`-named list,
-recursing into nested composers), not a stored field, since it can vary with tree content.
+Every component — embedding, block, unembedding, composer, a shared thing like RoPE or the norm —
+is one `ComponentSpec`: its type under a `"#type"` key, already-concrete constructor kwargs as
+siblings. A composer is a component like any other; its per-layer block list is just one of its own
+params (conventionally `"blocks"`), so nothing in this schema privileges "a stack of blocks" — a
+composer with several block lists, or one nesting another composer, needs no schema change. A
+block's feed-forward network is the same kind of thing: a nested `"mlp"` spec (see "Feed-forward and
+norm are components" below). `ModelConfig.n_layer` is a derived property (`_count_blocks` sums every
+`"blocks"`-named list, recursing into nested composers), not a stored field, since it can vary with
+tree content.
 
-`to_dict()`/`from_dict()` stamp/read a `"format": "modelcore.v1"` key. A dict with no `"format"`
-key predates `modelcore` and needs the host application's own legacy migration first. There is no
-`"arch"` field anywhere in this schema; `reference` (when present) is the closest equivalent, and
-it's provenance, not something `modelcore` ever reads back to decide how to build the tree.
+### Format versions
+
+`to_dict()` always stamps `"format": "modelcore.v2"`; `from_dict()` dispatches on it:
+
+- `"modelcore.v2"` parses as-is.
+- `"modelcore.v1"` — or **no `"format"` key at all**, which is what a v1 dict looks like to this
+  method — goes through `modelcore.config.upgrade.upgrade_v1_to_v2` first, then parses as v2.
+- Anything else raises `ValueError` naming the supported formats.
+
+(The version used to be write-only: stamped on save and discarded on load, so a hypothetical v2 dict
+would have silently loaded as v1. A host branching on `"format" in dict` still works, but should
+branch on the value.)
+
+`upgrade_v1_to_v2` is **the only code in `modelcore` allowed to supply a default value**. A v1 dict
+left a lot implicit — an MLP hardcoded per block type, a free-function norm, constructor defaults
+like `softcap=15` — and the converter writes each of those out, so a v1 config keeps building the
+exact same model (checked bit-for-bit against pre-change weights and logits). It also rewrites
+`window >= sequence_len` to `-1`. A **v2** dict that omits any of them is rejected, not completed.
+
+`ModelConfig.from_dict` also rejects, naming every offender: a missing required key
+(`sequence_len`, `vocab_size`, `n_embd`, `pad_vocab_size_to`, `template`, `input`, `body`, `output`)
+and any **unknown top-level key** — previously silently dropped, and then lost on the next save.
+There is no `"arch"` field anywhere in this schema; `reference` (when present) is the closest
+equivalent, and it's provenance, not something `modelcore` ever reads back to decide how to build
+the tree.
+
+### Comments
+
+A key starting with `_` is a freeform comment, at any level — top level, any `ComponentSpec`
+(including nested ones like a block's `mlp`), an adapter, and inside an adapter's `params`. They are
+kept in a `comments` dict beside `params`, never in it, so they **can never reach a constructor** and
+are never a validation error, yet **survive a round trip** (`to_dict` writes them back, first).
+The `_` prefix is what makes the distinction explicit: a mistyped parameter (`"comment"`,
+`"windw"`) is still an error, because it is not a comment.
+
+### `template`, `meta`, `tokenizer`
+
+- `template` (required; `"base"` or `"nanochat"`) says how the model is talked to: `base` is plain
+  completion, `nanochat` is the `<|user_start|>…` conversation format with Python tool calls
+  (`<|python_start|>…<|python_end|>`). It is **declarative only for now** — `validate_config` checks
+  it is one of `TEMPLATES` and nothing else reads it. Real validation (does the tokenizer carry the
+  tokens the template needs?) is deliberately deferred.
+- `meta` is a free-form dict for provenance (name, description, dates). Never interpreted. Distinct
+  from `reference`, which is preset-re-expansion machinery.
+- `tokenizer` is an opaque descriptor — conventionally `{"name", "fingerprint", "vocab_size",
+  "special_tokens"}` — so a checkpoint can say which tokenizer it needs. `modelcore` knows nothing
+  about tokenizers, so it is **carried, never checked**: a host reconciles it against `vocab_size`.
+
+Both are omitted from `to_dict()` when empty/`None`, since nothing about the architecture depends on
+them.
+
+### Feed-forward and norm are components
+
+A block's FFN is a nested spec, and the norm is a shared component, so neither is a hardcoded choice:
+
+```json
+{ "#type": "gpt_block", "layer_idx": 0, "n_head": 6, "window": -1,
+  "mlp": { "#type": "mlp", "activation": "relu2", "hidden_dim": 3072 } }
+```
+
+| `#type` | shape | `activation` |
+|---|---|---|
+| `mlp` | `c_proj(act(c_fc(x)))` | `relu2` \| `relu` \| `gelu` \| `silu` |
+| `gated_mlp` | `down(act(gate(x)) * up(x))` | `silu` \| `gelu` \| `relu` |
+
+`activation` and `hidden_dim` are both **required**: there is no `4 * n_embd` and no Llama rounding
+rule here — those derivations belong to the host layer that materializes the tree. `shared.norm` is
+`rms_norm` or `layer_norm` (`eps` required) and is injected into every component that needs it
+(`needs=(..., "norm")`), including attention's QK-norm. Neither norm has a learnable gain, so a
+shared instance adds nothing to `state_dict()` and every existing checkpoint loads unchanged.
+`rms_norm`'s `"eps": null` means torch's own default — the input dtype's machine epsilon — which is
+what every model trained before norm was configurable used, so it is a real value, not a placeholder.
 
 ### Only concrete, already-decided values — no rules
 
@@ -135,10 +211,20 @@ application's own preset/depth-dial layer (`nanochat/architectures/derive.py`, `
 - `has_value_embed`: a plain `bool` a `gpt_block`'s params carry directly — not `None` meaning
   "derive the alternating-by-parity pattern from `n_layer`". `Block` (the class backing
   `"gpt_block"`) doesn't take `n_layer` at all, because it never needs to re-derive anything.
-- `window`: a concrete int (or `-1` for full context) per block — not a pattern string like
-  `"SSSL"` tiled at construction time.
+- `window`: a concrete int per block, or **`-1` for full context** — never a pattern string like
+  `"SSSL"`, and never `sequence_len` as a spelling of "full". `sequence_len` is only the maximum a
+  model was trained/allocated for; inference may run shorter, so a window equal to it would bake the
+  training length into the architecture.
+- `mlp`: a nested spec stating the activation and inner width — not a `4 * n_embd` a component would
+  compute for itself.
 - `kv_slot`/`produces_kv`: concrete per-block values — not a `kv_share_frac` float a component
   would need to interpret.
+
+The same rule is why a v2 tree has **no defaults at all**: a default *is* a derivation rule ("if you
+don't say, it's 4x"). Omit `mlp`, `shared.norm`, `template`, or any formerly-defaulted constructor
+param (`softcap`, `smear`, `over_compute`, `backout_lambda_init`, `kv_slot`, `produces_kv`,
+`pad_vocab_size_to`, an adapter's `enabled`) and the config is rejected. Only the v1→v2 converter
+above writes those values in.
 
 This is the fix for the abstraction leak the whole design guards against: a component like
 `CausalSelfAttention` cannot have a method like `has_ve(layer_idx, n_layer)` (a policy about
@@ -204,7 +290,7 @@ always did — nothing extra).
 self-registers at its own class definition:
 
 ```python
-@register_component("gpt_block", needs=("n_embd", "padded_vocab_size", "rope", "runtime"),
+@register_component("gpt_block", needs=("n_embd", "padded_vocab_size", "rope", "norm", "runtime"),
                      validate=_validate_gpt_block)
 class Block(BaseBlock):
     ...
@@ -212,7 +298,7 @@ class Block(BaseBlock):
 
 `needs` names build-context values injected as constructor kwargs — derived globals
 (`n_embd`, `vocab_size`, `padded_vocab_size`, `sequence_len`, `runtime`) that `Model.__init__`
-computes once, plus `shared` components (built once and injected by name, e.g. `rope`) — so a
+computes once, plus `shared` components (built once and injected by name, e.g. `rope`, `norm`) — so a
 spec's `params` only ever needs to carry what's *not* derivable from context. `build_component`
 resolves any nested `ComponentSpec` (or list of them) first, then calls `cls(**resolved_params,
 **needed)`.
@@ -277,8 +363,8 @@ for *every* architecture — a host application wanting a different, legacy-shap
 builds it from `params_by_role` at its own layer (in this repo, `scripts/base_train.py`'s
 `_legacy_scaling_keys` does this for GPT's old six-key dict).
 
-`AttentionLayerSpec.window = -1` means unlimited/full context; a non-negative int is the number of
-preceding tokens attended to. `kv_slot = None` means "this layer owns a slot at its own position";
+`AttentionLayerSpec.window = -1` means unlimited/full context — the only spelling of it; a
+non-negative int is the number of preceding tokens attended to. `kv_slot = None` means "this layer owns a slot at its own position";
 a layer that reuses an earlier layer's K/V sets it to that layer's slot instead — see "Cross-layer
 KV sharing" below.
 

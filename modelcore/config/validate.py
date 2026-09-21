@@ -18,7 +18,7 @@ import dataclasses
 import inspect
 
 from modelcore.catalog import get_component, registered_types
-from modelcore.config.spec import ComponentSpec
+from modelcore.config.spec import TEMPLATES, ComponentSpec
 from modelcore.errors import ConfigError, ValidationReport
 
 
@@ -198,6 +198,13 @@ def validate_config(config) -> ValidationReport:
         value = getattr(config, field_name)
         if not isinstance(value, int) or value <= 0:
             errors.append(ConfigError(field_name, f"must be a positive integer, got {value!r}"))
+
+    if config.template not in TEMPLATES:
+        errors.append(ConfigError("template", f"must be one of {list(TEMPLATES)}, got {config.template!r}"))
+    if not isinstance(config.meta, dict):
+        errors.append(ConfigError("meta", f"must be a dict, got {type(config.meta).__name__}"))
+    if config.tokenizer is not None and not isinstance(config.tokenizer, dict):
+        errors.append(ConfigError("tokenizer", f"must be a dict or null, got {type(config.tokenizer).__name__}"))
 
     ctx = {
         "n_embd": config.n_embd, "vocab_size": config.vocab_size,

@@ -13,7 +13,7 @@ class BackoutComposer(BaseComposer):
     one scalar parameter it needs, rather than it dangling on some unrelated top-level object)."""
     PARAM_ROLES = {"backout_lambda": "backout_scalar"}
 
-    def __init__(self, blocks, backout_layer, backout_lambda_init=0.2):
+    def __init__(self, blocks, backout_layer, backout_lambda_init):
         super().__init__()
         self.blocks = nn.ModuleList(blocks)
         self.backout_layer = backout_layer

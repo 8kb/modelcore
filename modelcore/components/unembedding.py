@@ -5,10 +5,9 @@ import torch.nn.functional as F
 from modelcore.catalog import register_component
 from modelcore.components.contracts import BaseUnembedding
 from modelcore.components.linear import Linear
-from modelcore.components.norm import norm
 
 
-@register_component("lm_head", needs=("n_embd", "vocab_size", "padded_vocab_size"))
+@register_component("lm_head", needs=("n_embd", "vocab_size", "padded_vocab_size", "norm"))
 class LMHead(BaseUnembedding):
     """Final norm() + output projection + vocab crop + tanh softcap, and the loss when targets
     are given. Residual-stream activations -> logits.
@@ -18,9 +17,10 @@ class LMHead(BaseUnembedding):
     for that parameter via the param_roles() escape hatch, since whoever passed it in already
     owns (and declared a role for) it -- see modelcore.roles."""
 
-    def __init__(self, n_embd, vocab_size, padded_vocab_size, softcap=15, weight=None):
+    def __init__(self, n_embd, vocab_size, padded_vocab_size, norm, softcap, weight=None):
         super().__init__()
         self.vocab_size = vocab_size
+        self.norm = norm
         self.softcap = softcap
         self.lm_head = Linear(n_embd, padded_vocab_size, bias=False)
         self._tied = weight is not None
@@ -39,7 +39,7 @@ class LMHead(BaseUnembedding):
         # if tied, real values are set wherever the owning module's init_weights() runs
 
     def forward(self, x, targets=None, loss_reduction="mean"):
-        x = norm(x)
+        x = self.norm(x)
         logits = self.lm_head(x)  # (B, T, padded_vocab_size) <- very big tensor, large amount of memory
         logits = logits[..., :self.vocab_size]  # slice to remove padding
         logits = logits.float()  # switch to fp32 for logit softcap and loss computation

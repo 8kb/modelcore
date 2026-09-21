@@ -22,6 +22,7 @@ modelcore/
 ├── evaluate.py           evaluate_bpb -- bits-per-byte (ModelManager.evaluate_bpb is the seam)
 ├── config/
 │   ├── spec.py            ComponentSpec, ModelConfig, AttentionLayerSpec
+│   ├── upgrade.py         upgrade_v1_to_v2 -- the ONLY place a default value may be supplied
 │   └── validate.py        validate_config() -- structural + component-owned semantic checks
 ├── catalog.py           component registry: "#type" name -> (cls, needs, validate)
 ├── components/           linear, norm, rope, rotary, attention (incl. cross-layer KV sharing),
@@ -67,7 +68,13 @@ modelcore/
   `nn.Parameter` or submodule that forgets to declare a role raises at construction — far better
   than it silently defaulting into the wrong optimizer (e.g. Muon's shape-based matrix grouping).
   See [docs/architecture.md#component-contracts](docs/architecture.md#component-contracts).
-- **A config tree carries only concrete, already-decided values, never a derivation rule.**
+- **A config tree carries only concrete, already-decided values, never a derivation rule — and a
+  v2 tree has no defaults at all.** A default *is* a derivation rule ("if you don't say, it's 4x"),
+  so `mlp`, `shared.norm`, `template`, `softcap`, `smear`, `over_compute`, `backout_lambda_init`,
+  `kv_slot`/`produces_kv`, `pad_vocab_size_to` and an adapter's `enabled` are all required: omit one
+  and the config is rejected, not completed. **Only `config/upgrade.py` (v1→v2) may supply a value**
+  — its job is to write v1's implicit choices out so an old config builds the same model. Don't add
+  a `=default` to a component constructor param that a config can set to save a line in a test.
   `has_value_embed` is a plain bool per block, `window` a concrete int, `kv_slot`/`produces_kv`
   concrete per-block values — never a pattern string or a fraction a component would need to
   interpret. Every rule that produces these values lives one layer up, in the host application's
@@ -75,6 +82,24 @@ modelcore/
   at tree-expansion time, outside this package entirely. A component asking "which layer am I" or
   "how many layers are there" to re-derive a policy is exactly the abstraction leak this package's
   design eliminated.
+- **`window` is `-1` for full attention, never `sequence_len`.** `sequence_len` is the maximum a
+  model was trained/allocated for; inference may run shorter, so a window equal to it bakes the
+  training length into the architecture. The v1→v2 converter rewrites `window >= sequence_len` to
+  `-1`; a host preset layer must emit `-1` in the first place.
+- **A `_`-prefixed key is a comment and can never reach a constructor.** `ComponentSpec.comments` /
+  `AdapterSpec.comments` / `ModelConfig.comments` hold them *beside* `params`, and `to_dict` writes
+  them back, so they round-trip. Keep it that way: a comment in `params` would be a validation
+  error and indistinguishable from a mistyped param. Conversely an unknown top-level key without
+  the `_` is an error (`ModelConfig.from_dict`), never silently dropped.
+- **`template`, `meta`, `tokenizer` are declarative/opaque.** `template` (`"base"`/`"nanochat"`) is
+  validated against `TEMPLATES` and read by nothing yet; `meta` and `tokenizer` are carried, never
+  interpreted or cross-checked — modelcore knows nothing about tokenizers, so a host reconciles
+  `tokenizer` against `vocab_size` itself.
+- **Norms are parameterless on purpose.** `rms_norm`/`layer_norm` have no learnable gain: a gain
+  would need a `PARAM_ROLES` entry and would change the optimizer's positional on-disk layout, and
+  a parameterless shared instance adds nothing to `state_dict()`, which is what keeps every existing
+  checkpoint loadable. `"eps": null` on `rms_norm` is torch's own default (the input dtype's machine
+  epsilon), and is what the converter writes for v1.
 - **`ArtifactStore` is a real code path, not aspirational.** Saving/loading always goes through an
   `ArtifactStore` (`FileSystemStore` is the built-in one) — never `torch.save`/`torch.load`
   directly. A host application adapting an old on-disk format should subclass the store, not add a
