@@ -41,10 +41,30 @@ class RotaryEmbedding(nn.Module):
         self.cos, self.sin = cos, sin
 
     def _cos_sin(self, T, kv_cache):
-        assert T <= self.cos.size(1), f"Sequence length grew beyond the rotary embeddings cache: {T} > {self.cos.size(1)}"
         assert self.cos.dtype == self.runtime.compute_dtype, f"Rotary embeddings must be in {self.runtime.compute_dtype}, got {self.cos.dtype}"
-        T0 = 0 if kv_cache is None else kv_cache.get_pos()
-        return self.cos[:, T0:T0 + T], self.sin[:, T0:T0 + T]
+        if kv_cache is None:
+            T0 = 0
+        else:
+            # uniform_pos() is KVCache's ragged-aware accessor; a duck-typed cache offering only
+            # get_pos() (the minimal interface) is uniform by definition.
+            uniform_pos = getattr(kv_cache, "uniform_pos", None)
+            T0 = uniform_pos() if uniform_pos is not None else kv_cache.get_pos()
+        if T0 is not None:
+            # Every row at the same position (training, naive generate, batch-1 or replicated
+            # decode): one (1, T, 1, D/2) window, broadcast over rows by apply_rotary_emb.
+            assert T0 + T <= self.cos.size(1), f"Sequence length grew beyond the rotary embeddings cache: {T0 + T} > {self.cos.size(1)}"
+            return self.cos[:, T0:T0 + T], self.sin[:, T0:T0 + T]
+        # Right-ragged cache (see KVCache.prefill_row): row i's next position is cache_seqlens[i],
+        # so each row needs its own window. apply_rotary_emb broadcasts a (B, T, 1, D/2) cos over
+        # q/k's (B, T, H, D/2) halves exactly as it does the uniform (1, T, 1, D/2) form.
+        pos = kv_cache.cache_seqlens.to(torch.long)
+        idx = pos[:, None] + torch.arange(T, device=pos.device)  # (B, T)
+        assert int(idx.max().item()) < self.cos.size(1), f"Sequence length grew beyond the rotary embeddings cache: {int(idx.max().item()) + 1} > {self.cos.size(1)}"
+        B = pos.numel()
+        flat = idx.reshape(-1)
+        cos = self.cos[0].index_select(0, flat).view(B, T, 1, -1)
+        sin = self.sin[0].index_select(0, flat).view(B, T, 1, -1)
+        return cos, sin
 
     def forward(self, q, k, kv_cache):
         """Apply rotary position encoding to queries and keys, offsetting into the cache by the

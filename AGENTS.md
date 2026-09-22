@@ -116,6 +116,23 @@ modelcore/
 - **`kv_cache.advance()` belongs to `Model.forward`, not the last attention layer.** It fires once,
   after the whole block/composer loop runs — broken the moment a model has fewer KV slots than
   layers (cross-layer KV sharing), since no layer's index then equals the slot count.
+- **Multi-prompt decode is right-ragged, and `advance()` staying uniform is what keeps it correct.**
+  `Decoder`/`generate_with_tools` accept `list[list[int]]`: each prompt is prefilled alone at batch
+  1 and copied into its own row (`KVCache.prefill_row`), so row `i`'s KV occupies
+  `[0, cache_seqlens[i])` — no left padding, no position offset, which is what FA3's
+  `flash_attn_with_kvcache` natively means. Every row advances +1 per step, so the *differences*
+  between rows never change; anything that stops stepping a row (compaction, per-row early exit)
+  breaks that silently and has to replace `advance()`, not sit beside it. `KVCache.get_pos()`
+  **raises** on a ragged cache (use `cache_seqlens`/`uniform_pos()`); `RotaryEmbedding._cos_sin`
+  gathers per-row positions there, and the SDPA path masks with `col <= cache_seqlens[i] + t` (plus
+  the window) — causal alone excludes every stale column, which is why `reset()` never zeroes KV.
+  Rows that are all at one position take today's exact unmasked path, bit for bit. See
+  `kernels.flash_attn._ragged_decode_mask`.
+- **A freshly built model's logits ignore attention, RoPE, the window and the smear state.** Init
+  zeroes every attention `c_proj`, every MLP down-projection and the smear `lambda_`, so logits are
+  a function of the token embedding alone and a test of any of those passes whatever the code does
+  (this hid a wrong-RoPE-position mutation until models were "awakened" — see `_build_awake` in
+  `tests/test_generate.py`). Give such a test small random values in the zeroed parameters first.
 - **Intra-document masking's `doc_args` must be built outside `torch.compile`.**
   `kernels.flash_attn.build_doc_args(idx, bos_token_id)` derives per-row document boundaries via
   `nonzero()` and must be called in the training loop, before `model(x, y, doc_args=...)` — never

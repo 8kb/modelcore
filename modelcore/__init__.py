@@ -21,7 +21,10 @@ from modelcore.config.spec import (
     AdapterSpec, AttentionLayerSpec, ComponentSpec, ModelConfig, resolve_reference_config,
 )
 from modelcore.errors import ConfigError, ValidationReport
-from modelcore.generate import Decoder, ToolSpec, collect_batch, generate_naive, generate_with_tools, sample_next_token
+from modelcore.generate import (
+    Decoder, ToolSpec, collect_batch, collect_batch_multi, generate_naive, generate_with_tools,
+    sample_next_token,
+)
 from modelcore.manager import Fp8Report, ModelManager, OptimizerHparams
 from modelcore.model import Model
 from modelcore.runtime import (
@@ -37,7 +40,7 @@ __all__ = [
     "ModelConfig", "ComponentSpec", "AttentionLayerSpec", "AdapterSpec", "resolve_reference_config",
     "Model", "ModelStats", "KVCache",
     "Decoder", "generate_naive", "sample_next_token",
-    "ToolSpec", "generate_with_tools", "collect_batch",
+    "ToolSpec", "generate_with_tools", "collect_batch", "collect_batch_multi",
     "ConfigError", "ValidationReport",
     "ArtifactStore", "FileSystemStore", "last_step",
     "Runtime", "DEFAULT_RUNTIME", "compute_init", "compute_cleanup", "autodetect_device_type",

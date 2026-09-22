@@ -257,9 +257,10 @@ class ModelManager:
 
     def new_decoder(self, model: Model, tokens: list, *, num_samples: int = 1,
                      max_tokens: int | None = None, device=None) -> Decoder:
-        """Batch-1 prefill of tokens, replicated into an num_samples-row KV-cached decoder --
-        see modelcore.generate.Decoder. The generic (tokenizer-agnostic) half of a cached
-        autoregressive generation loop."""
+        """Batch-1 prefill of tokens (one prompt: list[int]), replicated into an num_samples-row
+        KV-cached decoder -- or of each prompt in tokens (several: list[list[int]]), each in its
+        own right-ragged row, P*num_samples rows in all -- see modelcore.generate.Decoder. The
+        generic (tokenizer-agnostic) half of a cached autoregressive generation loop."""
         return Decoder(model, self, tokens, num_samples=num_samples, max_tokens=max_tokens, device=device)
 
     # -- evaluate --

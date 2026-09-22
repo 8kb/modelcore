@@ -85,6 +85,13 @@ def _resolve_use_fa3():
 
 USE_FA3 = _resolve_use_fa3()
 
+# Test-only: force the SDPA KV-cache path through its ragged (explicit per-row mask) branch even
+# when every row is at the same position, so a batch-1 reference can run the very same masked
+# arithmetic as a ragged batch. Without it a last-ULP difference between the sliced and masked
+# softmax can flip an argmax on a near-tie in a randomly initialized model. Never set in
+# production: the uniform branch is what keeps every pre-ragged number reproducible.
+_force_ragged = False
+
 
 # =============================================================================
 # Intra-document masking: derive per-row document boundaries from BOS positions
@@ -236,6 +243,27 @@ def _sdpa_attention(q, k, v, window_size, enable_gqa, doc_ids=None):
 
     return F.scaled_dot_product_attention(q, k, v, attn_mask=mask, enable_gqa=enable_gqa)
 
+def _ragged_decode_mask(cache_seqlens, T_new, Tk, window, device):
+    """(B, 1, T_new, Tk) bool keep-mask for KV-cached attention over a right-ragged cache.
+
+    Row i's query t sits at absolute position q_pos = cache_seqlens[i] + t and its KV occupies
+    [0, cache_seqlens[i] + T_new). The causal term `col <= q_pos` alone already excludes every
+    column past that row's own content -- the newest column it admits, col == q_pos, is the slot
+    this same call just wrote -- so no separate validity term is needed, and the never-zeroed
+    stale region beyond a short row's content is unreachable by construction. Never all-masked:
+    col == q_pos always satisfies both terms, so there is no softmax-over-nothing NaN.
+
+    The sliding window is measured from each row's own q_pos, unlike the shared key-range slice the
+    uniform Tq == 1 path takes, which would be a different semantic window per row here."""
+    q_pos = cache_seqlens.to(torch.long).unsqueeze(1) + torch.arange(T_new, device=device)  # (B, T_new)
+    col = torch.arange(Tk, device=device).view(1, 1, Tk)
+    qp = q_pos.unsqueeze(2)  # (B, T_new, 1)
+    mask = col <= qp
+    if 0 <= window < Tk:
+        mask = mask & ((qp - col) <= window)
+    return mask.unsqueeze(1)
+
+
 # =============================================================================
 # Public API: Same interface as FA3
 # =============================================================================
@@ -301,15 +329,24 @@ def flash_attn_with_kvcache(q, k_cache, v_cache, k=None, v=None, cache_seqlens=N
 
     # SDPA fallback: manually manage KV cache
     B, T_new, H, D = q.shape
-    pos = cache_seqlens[0].item()  # assume uniform position across batch
+    seqlens = cache_seqlens.tolist()  # one host sync, same count as the .item() this replaced
+    lo, hi = min(seqlens), max(seqlens)
+    ragged = lo != hi or _force_ragged
 
     # Insert new k, v into cache (in-place, matching FA3 behavior)
     if k is not None and v is not None:
-        k_cache[:, pos:pos+T_new, :, :] = k
-        v_cache[:, pos:pos+T_new, :, :] = v
+        if not ragged:
+            k_cache[:, lo:lo+T_new, :, :] = k
+            v_cache[:, lo:lo+T_new, :, :] = v
+        else:
+            # Right-ragged: row i's new tokens land at [cache_seqlens[i], cache_seqlens[i] + T_new)
+            b_idx = torch.arange(B, device=q.device).unsqueeze(1)                            # (B, 1)
+            t_idx = cache_seqlens.to(torch.long).unsqueeze(1) + torch.arange(T_new, device=q.device)  # (B, T_new)
+            k_cache[b_idx, t_idx] = k
+            v_cache[b_idx, t_idx] = v
 
-    # Get full cache up to current position + new tokens
-    end_pos = pos + T_new
+    # Get full cache up to the furthest row's position + new tokens
+    end_pos = hi + T_new
     k_full = k_cache[:, :end_pos, :, :]
     v_full = v_cache[:, :end_pos, :, :]
 
@@ -319,7 +356,12 @@ def flash_attn_with_kvcache(q, k_cache, v_cache, k=None, v=None, cache_seqlens=N
     v_sdpa = v_full.transpose(1, 2)
 
     enable_gqa = q_sdpa.size(1) != k_sdpa.size(1)
-    y_sdpa = _sdpa_attention(q_sdpa, k_sdpa, v_sdpa, window_size, enable_gqa)
+    if not ragged:
+        # Every row at the same position: exactly the pre-ragged path, bit for bit.
+        y_sdpa = _sdpa_attention(q_sdpa, k_sdpa, v_sdpa, window_size, enable_gqa)
+    else:
+        mask = _ragged_decode_mask(cache_seqlens, T_new, end_pos, window_size[0], q.device)
+        y_sdpa = F.scaled_dot_product_attention(q_sdpa, k_sdpa, v_sdpa, attn_mask=mask, enable_gqa=enable_gqa)
 
     return y_sdpa.transpose(1, 2)  # back to (B, T, H, D)
 

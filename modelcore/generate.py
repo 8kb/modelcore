@@ -71,22 +71,45 @@ class Decoder:
     position at a time -- the generic half of a cached autoregressive decode loop (the other half,
     e.g. tool-use/forced-token state, belongs to the caller). Construct via
     ModelManager.new_decoder(model, tokens, ...); read .logits, choose a next token per row by
-    whatever means the caller wants, then call .step(token_column) to advance."""
+    whatever means the caller wants, then call .step(token_column) to advance.
+
+    `tokens` is one prompt (list[int]) -- prefilled once and replicated into num_samples identical
+    rows -- or several prompts (list[list[int]]), each prefilled separately at batch 1 and copied
+    into its own right-ragged row (see KVCache.prefill_row). With P prompts and num_samples=S there
+    are P*S rows in prompt-major order: row p*S + s is sample s of prompt p. Every row advances one
+    position per step() regardless of how long its own prompt was."""
 
     @torch.inference_mode()
     def __init__(self, model, manager, tokens, *, num_samples=1, max_tokens=None, device=None):
         self.model = model
         device = device or model.get_device()
-        # 1) Batch-1 prefill of the prompt tokens
-        kv_cache_prefill = manager.new_kv_cache(model, batch_size=1, seq_len=len(tokens), device=device)
-        ids = torch.tensor([tokens], dtype=torch.long, device=device)
-        logits = model.forward(ids, kv_cache=kv_cache_prefill)
-        self._logits = logits[:, -1, :].expand(num_samples, -1)  # (num_samples, vocab_size)
-        # 2) Replicate the KV cache for each sample/row
-        kv_length_hint = (len(tokens) + max_tokens) if max_tokens is not None else model.config.sequence_len
-        self.kv_cache = manager.new_kv_cache(model, batch_size=num_samples, seq_len=kv_length_hint, device=device)
-        self.kv_cache.prefill(kv_cache_prefill)
-        del kv_cache_prefill  # no need to keep this memory around
+        if isinstance(tokens[0], int):
+            # 1) Batch-1 prefill of the prompt tokens
+            kv_cache_prefill = manager.new_kv_cache(model, batch_size=1, seq_len=len(tokens), device=device)
+            ids = torch.tensor([tokens], dtype=torch.long, device=device)
+            logits = model.forward(ids, kv_cache=kv_cache_prefill)
+            self._logits = logits[:, -1, :].expand(num_samples, -1)  # (num_samples, vocab_size)
+            # 2) Replicate the KV cache for each sample/row
+            kv_length_hint = (len(tokens) + max_tokens) if max_tokens is not None else model.config.sequence_len
+            self.kv_cache = manager.new_kv_cache(model, batch_size=num_samples, seq_len=kv_length_hint, device=device)
+            self.kv_cache.prefill(kv_cache_prefill)
+            del kv_cache_prefill  # no need to keep this memory around
+            return
+
+        prompts = [list(p) for p in tokens]
+        kv_length_hint = (max(map(len, prompts)) + max_tokens) if max_tokens is not None else model.config.sequence_len
+        self.kv_cache = manager.new_kv_cache(model, batch_size=len(prompts) * num_samples, seq_len=kv_length_hint, device=device)
+        row_logits = []
+        for p, prompt in enumerate(prompts):
+            # Each prompt is prefilled alone, exactly as above, then freed before the next: only one
+            # transient prefill cache is ever alive.
+            kv_cache_prefill = manager.new_kv_cache(model, batch_size=1, seq_len=len(prompt), device=device)
+            ids = torch.tensor([prompt], dtype=torch.long, device=device)
+            row_logits.append(model.forward(ids, kv_cache=kv_cache_prefill)[:, -1, :].expand(num_samples, -1))
+            for s in range(num_samples):
+                self.kv_cache.prefill_row(p * num_samples + s, kv_cache_prefill)
+            del kv_cache_prefill
+        self._logits = torch.cat(row_logits, dim=0)  # (P * num_samples, vocab_size)
 
     @property
     def logits(self):
@@ -172,16 +195,26 @@ def generate_with_tools(model, manager, tokens, *, num_samples=1, max_tokens=Non
     their start/end ids (see ToolSpec) and stopping a row on any id in `terminal_ids`. Yields
     (token_column, token_masks) per step: mask=0 where a token was tool-forced, 1 if sampled.
 
-    tokens: prompt token ids (list[int]). terminal_ids: set[int] of ids that end a row (e.g. an
-    end-of-turn token, BOS). tools: an ordered list[ToolSpec] -- see _advance_row for the
-    start/end/capture priority."""
-    assert isinstance(tokens, list) and isinstance(tokens[0], int), "expecting list of ints"
+    tokens: prompt token ids (list[int]), or several prompts (list[list[int]]) decoded together.
+    With P prompts and num_samples=S each yielded token_column has P*S entries in prompt-major
+    order (entry p*S + s is sample s of prompt p) -- see Decoder. terminal_ids: set[int] of ids
+    that end a row (e.g. an end-of-turn token, BOS). tools: an ordered list[ToolSpec] -- see
+    _advance_row for the start/end/capture priority.
+
+    In the several-prompts form, a row that has hit a terminal id is frozen: still stepped through
+    the model (KVCache.advance needs every row to move every step) but fed its own last token and
+    skipped by the tool state machine. Without that, a finished row keeps "sampling" garbage and can
+    re-open the calculator tool -- one eval per dead row per remaining step of the longest row. The
+    single-prompt form never froze rows (its loop exits as soon as all are done) and is unchanged."""
+    multi = not isinstance(tokens[0], int)
+    prompts = [list(p) for p in tokens] if multi else [tokens]
+    assert all(isinstance(p, list) and p and isinstance(p[0], int) for p in prompts), "expecting list of ints (or list of such lists)"
     device = model.get_device()
     rng = torch.Generator(device=device)
     rng.manual_seed(seed)
 
     decoder = manager.new_decoder(model, tokens, num_samples=num_samples, max_tokens=max_tokens, device=device)
-    row_states = [RowState(tokens.copy()) for _ in range(num_samples)]
+    row_states = [RowState(p.copy()) for p in prompts for _ in range(num_samples)]
 
     num_generated = 0
     while True:
@@ -196,6 +229,10 @@ def generate_with_tools(model, manager, tokens, *, num_samples=1, max_tokens=Non
         token_column = []
         token_masks = []
         for i, state in enumerate(row_states):
+            if multi and state.completed:
+                token_column.append(state.current_tokens[-1])
+                token_masks.append(0)
+                continue
             is_forced = len(state.forced_tokens) > 0
             token_masks.append(0 if is_forced else 1)
             next_token = state.forced_tokens.popleft() if is_forced else sampled_tokens[i]
@@ -207,22 +244,32 @@ def generate_with_tools(model, manager, tokens, *, num_samples=1, max_tokens=Non
         decoder.step(token_column)
 
 
+def collect_batch_multi(stream, terminal_ids, prompts, num_samples):
+    """collect_batch for several prompts decoded together (see generate_with_tools): returns
+    (results, masks), each a list with one group per prompt of num_samples token-id lists, group p
+    prefixed with prompts[p]. Row r of the stream is sample r % num_samples of prompt
+    r // num_samples (prompt-major)."""
+    results = [[p.copy() for _ in range(num_samples)] for p in prompts]
+    masks = [[[0] * len(p) for _ in range(num_samples)] for p in prompts]
+    completed = [[False] * num_samples for _ in prompts]
+    for token_column, token_masks in stream:
+        for r, (token, mask) in enumerate(zip(token_column, token_masks)):
+            p, s = divmod(r, num_samples)
+            if not completed[p][s]:
+                if token in terminal_ids:
+                    completed[p][s] = True
+                else:
+                    results[p][s].append(token)
+                    masks[p][s].append(mask)
+        if all(all(group) for group in completed):
+            break
+    return results, masks
+
+
 def collect_batch(stream, terminal_ids, prompt_tokens, num_samples):
     """Drains a generate_with_tools (or any (token_column, token_masks)-yielding) stream into
     (results, masks): each a list of num_samples token-id lists, prompt_tokens-prefixed. A
     terminal token (see terminal_ids) is excluded from the row's own result, and stops that row's
     accumulation, but not the shared decode loop until every row is done."""
-    results = [prompt_tokens.copy() for _ in range(num_samples)]
-    masks = [[0] * len(prompt_tokens) for _ in range(num_samples)]
-    completed = [False] * num_samples
-    for token_column, token_masks in stream:
-        for i, (token, mask) in enumerate(zip(token_column, token_masks)):
-            if not completed[i]:
-                if token in terminal_ids:
-                    completed[i] = True
-                else:
-                    results[i].append(token)
-                    masks[i].append(mask)
-        if all(completed):
-            break
-    return results, masks
+    results, masks = collect_batch_multi(stream, terminal_ids, [prompt_tokens], num_samples)
+    return results[0], masks[0]

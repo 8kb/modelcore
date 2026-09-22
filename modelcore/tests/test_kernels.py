@@ -415,6 +415,137 @@ class TestSDPAOnly:
 
 
 # =============================================================================
+# Right-ragged KV-cache decode (SDPA fallback): rows at different cache positions
+# =============================================================================
+class TestRaggedKVCacheSDPA:
+    """flash_attn_with_kvcache's SDPA fallback when cache_seqlens differ per row (multi-prompt
+    batched decode; see KVCache.prefill_row). SDPA-only: it is the path every non-CUDA machine
+    runs. A batched ragged call must agree with running each row alone at its own position."""
+
+    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+    DTYPE = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+    H, D, T_MAX = 4, 16, 48
+
+    def _make(self, seqlens, T_new=1, seed=0):
+        """Random per-row KV history [0, L_i) in an (B, T_MAX, H, D) cache, plus fresh q/k/v."""
+        g = torch.Generator().manual_seed(seed)
+        B = len(seqlens)
+        r = lambda *s: torch.randn(*s, generator=g).to(device=self.DEVICE, dtype=self.DTYPE)
+        k_cache = torch.zeros(B, self.T_MAX, self.H, self.D, device=self.DEVICE, dtype=self.DTYPE)
+        v_cache = torch.zeros_like(k_cache)
+        for i, L in enumerate(seqlens):
+            k_cache[i, :L] = r(L, self.H, self.D)
+            v_cache[i, :L] = r(L, self.H, self.D)
+        q, k, v = (r(B, T_new, self.H, self.D) for _ in range(3))
+        cs = torch.tensor(seqlens, dtype=torch.int32, device=self.DEVICE)
+        return k_cache, v_cache, cs, q, k, v
+
+    def _call(self, k_cache, v_cache, cs, q, k, v, window=-1):
+        set_impl('sdpa')
+        try:
+            return flash_attn.flash_attn_with_kvcache(
+                q, k_cache, v_cache, k=k, v=v, cache_seqlens=cs, causal=True, window_size=(window, 0))
+        finally:
+            set_impl(None)
+
+    def _per_row(self, k_cache, v_cache, cs, q, k, v, window=-1):
+        """Each row alone at its own position, forced through the ragged branch so it runs the same
+        masked arithmetic as the batch. Returns (outputs, per-row cache copies after the write)."""
+        outs, caches = [], []
+        fa_module._force_ragged = True
+        try:
+            for i in range(q.size(0)):
+                kc, vc = k_cache[i:i+1].clone(), v_cache[i:i+1].clone()
+                outs.append(self._call(kc, vc, cs[i:i+1], q[i:i+1], k[i:i+1], v[i:i+1], window))
+                caches.append((kc, vc))
+        finally:
+            fa_module._force_ragged = False
+        return torch.cat(outs, dim=0), caches
+
+    @pytest.mark.parametrize("window", [-1, 8])
+    @pytest.mark.parametrize("T_new", [1, 3])
+    def test_batched_ragged_matches_each_row_alone(self, window, T_new):
+        seqlens = [4, 17, 31, 9]
+        kc, vc, cs, q, k, v = self._make(seqlens, T_new)
+        ref, _ = self._per_row(kc, vc, cs, q, k, v, window)
+        out = self._call(kc, vc, cs, q, k, v, window)
+        torch.testing.assert_close(out, ref, atol=1e-5, rtol=1e-5)
+
+    def test_batched_ragged_matches_uniform_path_at_batch_one(self):
+        """The ragged mask must agree with the pre-ragged sliced path, not just with itself."""
+        for window in (-1, 8):
+            kc, vc, cs, q, k, v = self._make([13], 1)
+            out_ragged = None
+            fa_module._force_ragged = True
+            try:
+                out_ragged = self._call(kc.clone(), vc.clone(), cs, q, k, v, window)
+            finally:
+                fa_module._force_ragged = False
+            out_uniform = self._call(kc.clone(), vc.clone(), cs, q, k, v, window)
+            torch.testing.assert_close(out_ragged, out_uniform, atol=1e-5, rtol=1e-5)
+
+    def test_stale_kv_beyond_a_rows_content_is_unreachable(self):
+        """reset() never zeroes KV, so a short row's region past its content may hold residue from
+        an earlier generation. Causal masking must make that unreachable: garbage there changes
+        nothing, bit for bit."""
+        seqlens = [4, 17, 31, 9]
+        kc, vc, cs, q, k, v = self._make(seqlens, 1)
+        clean = self._call(kc.clone(), vc.clone(), cs, q, k, v)
+        dirty_k, dirty_v = kc.clone(), vc.clone()
+        for i, L in enumerate(seqlens):
+            dirty_k[i, L + 1:] = 1e4      # everything past the slot this call writes
+            dirty_v[i, L + 1:] = -1e4
+        assert torch.equal(clean, self._call(dirty_k, dirty_v, cs, q, k, v))
+
+    def test_new_tokens_land_at_each_rows_own_offset(self):
+        seqlens = [4, 17, 31, 9]
+        kc, vc, cs, q, k, v = self._make(seqlens, 1)
+        before_k = kc.clone()
+        self._call(kc, vc, cs, q, k, v)
+        for i, L in enumerate(seqlens):
+            assert torch.equal(kc[i, L], k[i, 0])
+            assert torch.equal(vc[i, L], v[i, 0])
+            untouched = torch.ones(self.T_MAX, dtype=torch.bool)
+            untouched[L] = False
+            assert torch.equal(kc[i][untouched], before_k[i][untouched])
+
+    def test_sliding_window_is_measured_from_each_rows_own_position(self):
+        """Row 0 (position 3) still sees its whole history; row 1 (position 20, window 8) sees only
+        [12, 20]. A shared key-range slice would give both rows the same window."""
+        window = 8
+        kc, vc, cs, q, k, v = self._make([3, 20], 1)
+        base = self._call(kc.clone(), vc.clone(), cs, q, k, v, window)
+
+        out_of_window_k = kc.clone()
+        out_of_window_k[1, :10] += 5.0     # row 1: cols 0-9 are outside [12, 20]
+        assert torch.equal(base[1], self._call(out_of_window_k, vc.clone(), cs, q, k, v, window)[1])
+
+        in_window_k = kc.clone()
+        in_window_k[0, 0] += 5.0           # row 0: col 0 is inside its window
+        assert not torch.equal(base[0], self._call(in_window_k, vc.clone(), cs, q, k, v, window)[0])
+
+    def test_uniform_positions_take_the_unchanged_path(self):
+        """Equal cache_seqlens must be bit-identical to the pre-ragged implementation."""
+        for window in (-1, 8):
+            kc, vc, cs, q, k, v = self._make([13, 13], 1)
+            out = self._call(kc.clone(), vc.clone(), cs, q, k, v, window)
+            rc, rv = kc.clone(), vc.clone()
+            rc[:, 13:14], rv[:, 13:14] = k, v
+            ref = fa_module._sdpa_attention(
+                q.transpose(1, 2), rc[:, :14].transpose(1, 2), rv[:, :14].transpose(1, 2),
+                (window, 0), False).transpose(1, 2)
+            assert torch.equal(out, ref)
+
+    def test_existing_uniform_cache_tests_still_pass_with_ragged_branch_forced(self):
+        """Free extra sweep: push a full prefill + decode through the masked branch."""
+        fa_module._force_ragged = True
+        try:
+            TestSDPAOnly().test_kvcache()
+        finally:
+            fa_module._force_ragged = False
+
+
+# =============================================================================
 # build_doc_args: BOS-boundary segmentation (device/backend independent)
 # =============================================================================
 BOS = 999
