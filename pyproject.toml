@@ -1,6 +1,6 @@
 [project]
 name = "modelcore"
-version = "0.7.0"
+version = "0.7.1"
 description = "A standalone model subsystem: configs, architectures-as-data, and the machinery to create/load/save models and optimizers"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -11,9 +11,18 @@ dependencies = [
 [project.optional-dependencies]
 # The FA3 flash-attention kernel path (modelcore/kernels/flash_attn.py); without this installed,
 # attention falls back to torch's own scaled_dot_product_attention automatically.
+#
+# kernels pinned EXACTLY, not >=: flash_attn.py's get_kernel(repo_id) calls pass no version=/
+# revision=, which kernels>=0.15 hard-errors on (deprecated since 0.12; see
+# https://huggingface.co/docs/kernels/migration). nanochat's own uv.lock has run this exact code
+# successfully across dozens of real GPU runs, pinned at exactly this version -- modelcore, as a
+# freshly extracted package (2026-09-09) with its own independently-resolved lockfile, floated
+# past that breaking change on a fresh `uv sync` even though this call site never changed. Pin to
+# the version already proven working rather than teaching every call site a newer API; bump this
+# deliberately (and add version=/revision= at each call site) if a real reason to upgrade comes up.
 fa3 = [
     "hf_transfer>=0.1.9",
-    "kernels>=0.11.7",
+    "kernels==0.11.7",
 ]
 
 [dependency-groups]
