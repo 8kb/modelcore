@@ -26,7 +26,7 @@ def _gpt_like(n_layer=4, n_head=2, n_kv_head=2, n_embd=64, head_dim=32, vocab_si
             "has_value_embed": (i % 2 == (n_layer - 1) % 2),
             "resid_lambda_init": 1.15 - 0.10 * i / max(n_layer - 1, 1),
             "x0_lambda_init": 0.20 - 0.15 * i / max(n_layer - 1, 1),
-            "mlp": mlp(),
+            "mlp": mlp(), "head_dim": head_dim,
         })
         for i in range(n_layer)
     ]
@@ -49,6 +49,7 @@ def _plain_like(n_layer=4, n_head=2, n_kv_head=2, n_embd=64, head_dim=32, vocab_
     blocks = []
     for i in range(n_layer):
         params = {"layer_idx": i, "n_head": n_head, "n_kv_head": n_kv_head, "window": window, "mlp": mlp(),
+                  "head_dim": head_dim,
                   "kv_slot": None if kv_slots is None else kv_slots[i],
                   "produces_kv": True if kv_slots is None else kv_slots[i] == i}
         blocks.append(ComponentSpec("plain_block", params))
@@ -89,6 +90,14 @@ def _llama_layer_norm():
                        norm=lambda: ComponentSpec("layer_norm", {"eps": 1e-5}))
 
 
+def _gpt_decoupled_head_dim():
+    """head_dim stated explicitly and NOT equal to n_embd // n_head: n_head=8 * head_dim=16 = 128,
+    double n_embd=64. Proves attention width is genuinely decoupled from n_embd (c_q/c_k/c_v/c_proj
+    size off n_head*head_dim, not off n_embd) -- exercised through every generic parametrized test
+    (forward, backward, stats, save/load, optimizer groups, kv_cache_spec) for free."""
+    return _gpt_like(n_head=8, n_kv_head=8, head_dim=16)
+
+
 FLAVORS = {
     "gpt": lambda: _gpt_like(),
     "llama": lambda: _plain_like(),
@@ -97,6 +106,7 @@ FLAVORS = {
     "gpt_lora": _gpt_lora,
     "gpt_gated_mlp": _gpt_gated_mlp,
     "llama_layer_norm": _llama_layer_norm,
+    "gpt_decoupled_head_dim": _gpt_decoupled_head_dim,
 }
 
 

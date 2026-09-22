@@ -190,6 +190,8 @@ def _target(config, where):
     ("gpt", "body", "backout_lambda_init"),
     ("llama", "block0", "kv_slot"),
     ("llama", "block0", "produces_kv"),
+    ("gpt", "block0", "head_dim"),
+    ("llama", "block0", "head_dim"),
 ])
 def test_formerly_defaulted_params_are_now_required(manager, flavor, where, param):
     config = FLAVORS[flavor]()
@@ -336,6 +338,10 @@ def test_upgrade_materializes_what_v1_hardcoded():
     assert plain["mlp"] == {"#type": "gated_mlp", "activation": "silu", "hidden_dim": 2048}
     assert (plain["kv_slot"], plain["produces_kv"]) == (None, True)
     assert d["input"]["smear"] is True and d["output"]["softcap"] == 15
+    # v1 had no head_dim concept -- every block derived it as n_embd // n_head; null is the v2
+    # spelling of "derive it" (see CausalSelfAttention), so both blocks upgrade to null, not to
+    # some computed number.
+    assert gpt["head_dim"] is None and plain["head_dim"] is None
 
 
 def test_upgrade_rounds_the_gated_width_up_to_a_multiple_of_256():
@@ -352,11 +358,13 @@ def test_upgrade_never_overrides_a_value_the_dict_already_states():
                           "input": {"#type": "token_embedding", "smear": False},
                           "output": {"#type": "lm_head", "softcap": 30},
                           "body": {"#type": "stack", "blocks": [
-                              {"#type": "gpt_block", "window": -1, "mlp": {"#type": "mlp", "activation": "gelu", "hidden_dim": 7}}]}})
+                              {"#type": "gpt_block", "window": -1, "head_dim": 16,
+                               "mlp": {"#type": "mlp", "activation": "gelu", "hidden_dim": 7}}]}})
     assert d["template"] == "nanochat" and d["pad_vocab_size_to"] == 128
     assert d["shared"]["norm"] == {"#type": "layer_norm", "eps": 1e-6}
     assert d["input"]["smear"] is False and d["output"]["softcap"] == 30
     assert d["body"]["blocks"][0]["mlp"] == {"#type": "mlp", "activation": "gelu", "hidden_dim": 7}
+    assert d["body"]["blocks"][0]["head_dim"] == 16
 
 
 def test_upgrade_normalizes_full_context_windows_to_minus_one():

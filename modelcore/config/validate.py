@@ -87,21 +87,31 @@ def _collect_block_specs(spec, path):
     return found
 
 
-def _validate_kv_layout(body, errors):
+def _validate_kv_layout(body, n_embd, errors):
     """Structural cross-layer checks -- computed directly from block spec params (n_head,
-    n_kv_head, window, kv_slot, produces_kv), without building a real model, so a bad config is
-    caught before any tensor is allocated. Mirrors what modelcore.stats.kv_cache_spec() would
-    otherwise raise an AssertionError for at model-build time."""
+    n_kv_head, head_dim, window, kv_slot, produces_kv), without building a real model, so a bad
+    config is caught before any tensor is allocated. Mirrors what modelcore.stats.kv_cache_spec()
+    would otherwise raise an AssertionError for at model-build time.
+
+    What the KV cache actually requires uniform is head_dim (and n_kv_head), not n_head -- an
+    explicit head_dim decouples the two (see CausalSelfAttention), so blocks may disagree on
+    n_head as long as they agree on head_dim. A block with head_dim=null derives it from
+    n_embd // n_head for this check the same way CausalSelfAttention would; a block whose n_head
+    doesn't divide n_embd is left out of the head_dims set here (n_embd-divisibility is
+    _validate_attention_shape's job, already reported there)."""
     blocks = _collect_block_specs(body, "body")
     if not blocks:
         return
-    n_heads, n_kv_heads, slots = set(), set(), []
+    head_dims, n_kv_heads, slots = set(), set(), []
     for i, (path, block_spec) in enumerate(blocks):
         p = block_spec.params
         n_head = p.get("n_head")
         n_kv_head = p.get("n_kv_head", n_head)
-        if n_head is not None:
-            n_heads.add(n_head)
+        head_dim = p.get("head_dim")
+        if head_dim is None and n_head and isinstance(n_embd, int) and n_embd % n_head == 0:
+            head_dim = n_embd // n_head
+        if head_dim is not None:
+            head_dims.add(head_dim)
         if n_kv_head is not None:
             n_kv_heads.add(n_kv_head)
         kv_slot = p.get("kv_slot", i)
@@ -109,10 +119,8 @@ def _validate_kv_layout(body, errors):
         produces_kv = p.get("produces_kv", True)
         if not produces_kv and kv_slot is not None and kv_slot >= i:
             errors.append(ConfigError(path, f"kv_slot {kv_slot} does not point at an earlier producer layer"))
-    if len(n_heads) > 1:
-        # head_dim = n_embd // n_head, and n_embd is one global value -- non-uniform n_head is
-        # exactly non-uniform head_dim, which kv_cache_spec() also requires uniform.
-        errors.append(ConfigError("body", f"non-uniform n_head across blocks: {sorted(n_heads)} (KV cache requires uniform head_dim, i.e. uniform n_head)"))
+    if len(head_dims) > 1:
+        errors.append(ConfigError("body", f"non-uniform head_dim across blocks: {sorted(head_dims)} (KV cache requires uniform head_dim)"))
     if len(n_kv_heads) > 1:
         errors.append(ConfigError("body", f"non-uniform n_kv_head across blocks: {sorted(n_kv_heads)} (KV cache requires uniform n_kv_head)"))
     distinct_slots = sorted(set(slots))
@@ -224,7 +232,7 @@ def validate_config(config) -> ValidationReport:
         errors.append(ConfigError("body", "must be set"))
     else:
         _validate_spec(config.body, ctx, "body", errors)
-        _validate_kv_layout(config.body, errors)
+        _validate_kv_layout(config.body, config.n_embd, errors)
 
     if config.output is None:
         errors.append(ConfigError("output", "must be set"))

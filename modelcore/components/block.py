@@ -10,13 +10,19 @@ def _validate_attention_shape(params, ctx):
     """Shared semantic checks for any attention-shaped block: n_embd/n_head/n_kv_head must be
     mutually consistent (the same constraints modelcore.components.attention.CausalSelfAttention
     asserts at construction time -- reported here as validation errors instead of crashing the
-    build), and window must be a real window value."""
+    build), and window must be a real window value. head_dim=None (derive from n_embd // n_head)
+    still requires that division to be exact; an explicit head_dim decouples the two, so it isn't
+    checked against n_embd/n_head here -- see _validate_kv_layout for the uniform-head_dim check
+    the KV cache actually needs."""
     errors = []
     n_head = params.get("n_head")
     n_kv_head = params.get("n_kv_head", n_head)
     n_embd = ctx.get("n_embd")
-    if n_head and n_embd is not None and n_embd % n_head != 0:
+    head_dim = params.get("head_dim")
+    if head_dim is None and n_head and n_embd is not None and n_embd % n_head != 0:
         errors.append(f"n_embd ({n_embd}) must be divisible by n_head ({n_head})")
+    if head_dim is not None and (not isinstance(head_dim, int) or isinstance(head_dim, bool) or head_dim <= 0):
+        errors.append(f"head_dim must be a positive integer or null, got {head_dim!r}")
     if n_head and n_kv_head:
         if n_kv_head > n_head:
             errors.append(f"n_kv_head ({n_kv_head}) cannot exceed n_head ({n_head})")
@@ -54,10 +60,10 @@ class Block(BaseBlock):
     PARAM_ROLES = {"resid_lambda": "resid_scalar", "x0_lambda": "x0_scalar"}
 
     def __init__(self, n_embd, n_head, n_kv_head, layer_idx, window, rope, norm, padded_vocab_size,
-                 resid_lambda_init, x0_lambda_init, has_value_embed, mlp, runtime=None):
+                 resid_lambda_init, x0_lambda_init, has_value_embed, mlp, head_dim, runtime=None):
         super().__init__()
         self.attn = CausalSelfAttention(n_embd, n_head, n_kv_head, layer_idx, window, rope, norm, padded_vocab_size,
-                                         has_value_embed, runtime=runtime)
+                                         has_value_embed, head_dim, runtime=runtime)
         self.norm = norm
         self.mlp = mlp
         self.resid_lambda = nn.Parameter(torch.empty(()))  # fake init, real init in init_weights()
@@ -98,10 +104,11 @@ class PlainBlock(BaseBlock):
     fewer Linear submodules -- nothing to declare either way."""
 
     def __init__(self, n_embd, n_head, n_kv_head, layer_idx, window, rope, norm, padded_vocab_size,
-                 kv_slot, produces_kv, mlp, runtime=None):
+                 kv_slot, produces_kv, mlp, head_dim, runtime=None):
         super().__init__()
         self.attn = CausalSelfAttention(n_embd, n_head, n_kv_head, layer_idx, window, rope, norm, padded_vocab_size,
-                                         has_value_embed=False, kv_slot=kv_slot, produces_kv=produces_kv, runtime=runtime)
+                                         has_value_embed=False, head_dim=head_dim, kv_slot=kv_slot,
+                                         produces_kv=produces_kv, runtime=runtime)
         self.norm = norm
         self.mlp = mlp
 

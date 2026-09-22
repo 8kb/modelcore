@@ -86,6 +86,15 @@ modelcore/
   model was trained/allocated for; inference may run shorter, so a window equal to it bakes the
   training length into the architecture. The v1→v2 converter rewrites `window >= sequence_len` to
   `-1`; a host preset layer must emit `-1` in the first place.
+- **A block's `head_dim` and `shared.rope`'s own `head_dim` are stated independently and never
+  cross-checked.** `head_dim=null` on a block derives `n_embd // n_head` (what every config did
+  before this param existed — the v1→v2 converter writes `null`, never a computed number); an
+  explicit value decouples attention width from `n_head` entirely, e.g. more heads at a fixed
+  `head_dim` that no longer equals `n_embd // n_head`. `_validate_kv_layout` requires uniform
+  `head_dim` *across blocks* (what the KV cache needs), but nothing checks a block's `head_dim`
+  against `shared.rope`'s — `apply_rotary_emb` just splits by `shared.rope`'s own `head_dim` and
+  multiplies, so a mismatch is a runtime shape error (or a silently wrong broadcast on a
+  same-size-coincidence), not a validation one. Keep them equal by hand.
 - **A `_`-prefixed key is a comment and can never reach a constructor.** `ComponentSpec.comments` /
   `AdapterSpec.comments` / `ModelConfig.comments` hold them *beside* `params`, and `to_dict` writes
   them back, so they round-trip. Keep it that way: a comment in `params` would be a validation

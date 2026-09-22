@@ -16,6 +16,13 @@ class CausalSelfAttention(nn.Module):
     config tree is materialized (the host application's depth-dial layer decides this, e.g. via a
     has_value_embed-parity rule); this module has no opinion about how that policy is chosen.
 
+    head_dim=None derives the per-head width as n_embd // n_head (today's only behavior until this
+    param existed, still requiring n_embd % n_head == 0); an explicit value decouples attention
+    width from n_head entirely -- c_q/c_k/c_v/c_proj size off n_head * head_dim, which need not
+    equal n_embd, so adding heads at a fixed head_dim is not free the way it is when head_dim is
+    derived. shared.rope's own head_dim is stated independently and is never cross-checked against
+    this one -- keep them equal by hand, a mismatch is a runtime shape error, not a validation one.
+
     Cross-layer KV sharing: a layer built with produces_kv=False has no c_k/c_v at all and, at
     forward time, reads an earlier layer's already-RoPE'd/normed/scaled K/V out of kv_bus instead
     of computing its own -- it only projects and rotates its own queries. kv_slot identifies which
@@ -36,7 +43,7 @@ class CausalSelfAttention(nn.Module):
     PARAM_ROLES = {"value_embed": "value_embedding"}
 
     def __init__(self, n_embd, n_head, n_kv_head, layer_idx, window, rope, norm, padded_vocab_size, has_value_embed,
-                 kv_slot=None, produces_kv=True, runtime=None):
+                 head_dim, kv_slot=None, produces_kv=True, runtime=None):
         super().__init__()
         assert produces_kv or not has_value_embed, "a KV-sharing consumer layer cannot have its own value embedding"
         self.runtime = runtime or DEFAULT_RUNTIME
@@ -46,8 +53,14 @@ class CausalSelfAttention(nn.Module):
         self.n_head = n_head
         self.n_kv_head = n_kv_head
         self.n_embd = n_embd
-        self.head_dim = n_embd // n_head
-        assert n_embd % n_head == 0
+        # head_dim=None means "derive it from n_embd // n_head" (today's only behavior until this
+        # param existed); an explicit value decouples attention width from n_embd entirely -- c_q's
+        # fan-out becomes n_head * head_dim, which need not equal n_embd, and c_proj's fan-in follows
+        # it back. Only the derived case still needs n_embd % n_head == 0.
+        if head_dim is None:
+            assert n_embd % n_head == 0
+            head_dim = n_embd // n_head
+        self.head_dim = head_dim
         assert n_kv_head <= n_head and n_head % n_kv_head == 0
         self.window = window
         self.rope = rope
@@ -55,7 +68,7 @@ class CausalSelfAttention(nn.Module):
         self.c_q = Linear(n_embd, n_head * self.head_dim, bias=False)
         self.c_k = Linear(n_embd, n_kv_head * self.head_dim, bias=False) if produces_kv else None
         self.c_v = Linear(n_embd, n_kv_head * self.head_dim, bias=False) if produces_kv else None
-        self.c_proj = Linear(n_embd, n_embd, bias=False)
+        self.c_proj = Linear(n_head * self.head_dim, n_embd, bias=False)
         kv_dim = n_kv_head * self.head_dim
         self.value_embed = nn.Embedding(padded_vocab_size, kv_dim) if has_value_embed else None
         self.ve_gate_channels = 12
