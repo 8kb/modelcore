@@ -7,6 +7,8 @@ For the family-wide pattern this repo follows (one entrypoint, zero host imports
 consumption contract) see [llmllab/AGENTS.md](../llmllab/AGENTS.md) and
 [llmllab/docs/subsystem-conventions.md](../llmllab/docs/subsystem-conventions.md).
 
+All code, comments, docs, commit messages, and any other text committed to git MUST be in English.
+
 A host application pins this repo by git tag (`pyproject.toml`'s `[tool.uv.sources]`) and consumes
 it entirely through `ModelManager` — see [`llmllab/AGENTS.md`](../llmllab/AGENTS.md)'s family map
 for which repos currently do that, and each one's own `docs/architecture.md` for its side of the
