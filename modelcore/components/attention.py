@@ -1,67 +1,105 @@
 import torch
-import torch.nn as nn
 
+from modelcore.catalog import register_component
+from modelcore.components.contracts import BaseMixer, FeatureHost
 from modelcore.components.linear import Linear
-from modelcore.config.spec import AttentionLayerSpec
+from modelcore.config.spec import AttentionLayerSpec, ComponentSpec
 from modelcore.kernels.flash_attn import flash_attn
 from modelcore.runtime import DEFAULT_RUNTIME
 
 
-class CausalSelfAttention(nn.Module):
-    """GQA + RoPE + QK-norm + optional value-residual (ResFormer-style) + FA3/SDPA sliding-window
-    attention. Owns its window, its (optional) value-embedding table, and its layer_spec(); takes
-    explicit dims rather than a config object so it can be reused by a block with different config
-    field names. has_value_embed is a plain, already-decided boolean here -- which layers get a
-    value embedding is an architecture-level policy decision made once, outside modelcore, when a
-    config tree is materialized (the host application's depth-dial layer decides this, e.g. via a
-    has_value_embed-parity rule); this module has no opinion about how that policy is chosen.
+def _validate_attention(params, ctx):
+    """Semantic checks for the attention mixer: n_embd/n_head/n_kv_head must be mutually
+    consistent (the same constraints CausalSelfAttention asserts at construction time -- reported
+    here as validation errors instead of crashing the build), window must be a real window value,
+    and its features must fit its geometry. head_dim=None (derive from n_embd // n_head) still
+    requires that division to be exact; an explicit head_dim decouples the two, so it isn't checked
+    against n_embd/n_head here -- see validate._validate_kv_layout for the uniform-head_dim check
+    the KV cache actually needs."""
+    errors = []
+    n_head = params.get("n_head")
+    n_kv_head = params.get("n_kv_head", n_head)
+    n_embd = ctx.get("n_embd")
+    head_dim = params.get("head_dim")
+    if head_dim is None and n_head and n_embd is not None and n_embd % n_head != 0:
+        errors.append(f"n_embd ({n_embd}) must be divisible by n_head ({n_head})")
+    if head_dim is not None and (not isinstance(head_dim, int) or isinstance(head_dim, bool) or head_dim <= 0):
+        errors.append(f"head_dim must be a positive integer or null, got {head_dim!r}")
+    if n_head and n_kv_head:
+        if n_kv_head > n_head:
+            errors.append(f"n_kv_head ({n_kv_head}) cannot exceed n_head ({n_head})")
+        elif n_head % n_kv_head != 0:
+            errors.append(f"n_head ({n_head}) must be divisible by n_kv_head ({n_kv_head})")
+    window = params.get("window", -1)
+    if not isinstance(window, int) or window < -1:
+        errors.append(f"window must be -1 (full context) or a non-negative integer, got {window!r}")
+    produces_kv = params.get("produces_kv", True)
+    if not produces_kv and params.get("kv_slot") is None:
+        errors.append("produces_kv=False requires an explicit kv_slot pointing at the producer layer")
+    if head_dim is None and n_head and n_embd is not None and n_embd % n_head == 0:
+        head_dim = n_embd // n_head
+    for feature in params.get("features") or []:
+        if not isinstance(feature, ComponentSpec):
+            continue
+        if feature.type == "value_embed" and not produces_kv:
+            errors.append("a KV-sharing consumer layer (produces_kv=False) cannot have a value_embed feature")
+        if feature.type == "output_gate" and feature.params.get("granularity") == "block":
+            block_size = feature.params.get("block_size")
+            if isinstance(block_size, int) and isinstance(head_dim, int) and block_size > 0 and head_dim % block_size != 0:
+                errors.append(f"head_dim ({head_dim}) must be divisible by output_gate.block_size ({block_size})")
+    return errors
 
-    head_dim=None derives the per-head width as n_embd // n_head (today's only behavior until this
-    param existed, still requiring n_embd % n_head == 0); an explicit value decouples attention
-    width from n_head entirely -- c_q/c_k/c_v/c_proj size off n_head * head_dim, which need not
-    equal n_embd, so adding heads at a fixed head_dim is not free the way it is when head_dim is
-    derived. shared.rope's own head_dim is stated independently and is never cross-checked against
-    this one -- keep them equal by hand, a mismatch is a runtime shape error, not a validation one.
+
+@register_component("attention", needs=("n_embd", "rope", "norm", "runtime"), validate=_validate_attention)
+class CausalSelfAttention(BaseMixer, FeatureHost):
+    """GQA + RoPE + QK-norm + FA3/SDPA sliding-window attention, as a Block's mixer. Owns its
+    window and its layer_spec(); takes explicit dims rather than a config object.
+
+    Features (see modelcore.components.features) attach at two hook points: `values` (after V is
+    projected -- value_embed, the ResFormer-style value residual) and `output` (the per-head
+    attention output, before c_proj -- output_gate). Which layers carry which feature is an
+    architecture-level decision made once, outside modelcore, when a config tree is materialized.
+
+    head_dim=None derives the per-head width as n_embd // n_head (still requiring n_embd % n_head
+    == 0); an explicit value decouples attention width from n_head entirely -- c_q/c_k/c_v/c_proj
+    size off n_head * head_dim, which need not equal n_embd, so adding heads at a fixed head_dim is
+    not free the way it is when head_dim is derived. shared.rope's own head_dim is stated
+    independently and is never cross-checked against this one -- keep them equal by hand, a
+    mismatch is a runtime shape error, not a validation one.
 
     Cross-layer KV sharing: a layer built with produces_kv=False has no c_k/c_v at all and, at
     forward time, reads an earlier layer's already-RoPE'd/normed/scaled K/V out of kv_bus instead
     of computing its own -- it only projects and rotates its own queries. kv_slot identifies which
-    KVCache slot this layer's K/V lives in; layers that produce their own K/V default kv_slot to
-    their layer_idx (today's one-slot-per-layer behavior), and a consumer layer is given the
-    producer's kv_slot explicitly by whatever built the tree. Passing the producer's own k/v
-    tensors back into flash_attn_with_kvcache for the consumer (rather than k=None) sidesteps a
-    real FA3-vs-SDPA divergence in what k=None means (see modelcore/docs/architecture.md's
-    "Cross-layer KV sharing") -- the write is a no-op since the producer already wrote those exact
-    tensors to that slot earlier in the same forward pass.
+    KVCache slot this layer's K/V lives in; kv_slot=None means "my own slot at my layer_idx"
+    (bound by the owning Block via bind_layer), and a consumer layer is given the producer's
+    kv_slot explicitly. In a model where not every layer is attention, layer_idx is not a
+    contiguous slot number, so such a config states every kv_slot explicitly. Passing the
+    producer's own k/v tensors back into flash_attn_with_kvcache for the consumer (rather than
+    k=None) sidesteps a real FA3-vs-SDPA divergence in what k=None means (see
+    modelcore/docs/architecture.md's "Cross-layer KV sharing") -- the write is a no-op since the
+    producer already wrote those exact tensors to that slot earlier in the same forward pass.
 
     Intra-document masking: doc_args (see modelcore.kernels.flash_attn.build_doc_args), when given,
     restricts attention to within each packed row's own document -- forwarded to
     flash_attn.flash_attn_func unchanged, training only (always None when kv_cache is not None;
     see Model.forward). This module doesn't derive it from idx itself: doc_args is per-batch
-    runtime data built once outside torch.compile and threaded through like kv_bus, not a
-    per-layer policy.
+    runtime data built once outside torch.compile and threaded through like kv_bus."""
+    HOOK_POINTS = ("values", "output")
+    HAS_KV_SLOT = True  # what validate._validate_kv_layout looks for in a block's mixer
 
-    Output gating: an optional attn_gate component (see modelcore.components.attn_gate), given as
-    `gate` or attached afterwards with attach_gate(), multiplies the per-head attention output by
-    a sigmoid gate computed from this layer's normed input, right before c_proj. It touches only
-    the output, so it works unchanged for KV-sharing consumer layers and on the kv-cache path."""
-    PARAM_ROLES = {"value_embed": "value_embedding"}
-
-    def __init__(self, n_embd, n_head, n_kv_head, layer_idx, window, rope, norm, padded_vocab_size, has_value_embed,
-                 head_dim, kv_slot=None, produces_kv=True, runtime=None, gate=None):
+    def __init__(self, n_embd, n_head, n_kv_head, head_dim, window, kv_slot, produces_kv, features,
+                 rope, norm, runtime=None):
         super().__init__()
-        assert produces_kv or not has_value_embed, "a KV-sharing consumer layer cannot have its own value embedding"
         self.runtime = runtime or DEFAULT_RUNTIME
-        self.layer_idx = layer_idx
-        self.kv_slot = layer_idx if kv_slot is None else kv_slot
+        self._kv_slot = kv_slot
+        self.kv_slot = kv_slot  # resolved against layer_idx in bind_layer
         self.produces_kv = produces_kv
         self.n_head = n_head
         self.n_kv_head = n_kv_head
         self.n_embd = n_embd
-        # head_dim=None means "derive it from n_embd // n_head" (today's only behavior until this
-        # param existed); an explicit value decouples attention width from n_embd entirely -- c_q's
-        # fan-out becomes n_head * head_dim, which need not equal n_embd, and c_proj's fan-in follows
-        # it back. Only the derived case still needs n_embd % n_head == 0.
+        # head_dim=None means "derive it from n_embd // n_head"; an explicit value decouples
+        # attention width from n_embd entirely -- c_q's fan-out becomes n_head * head_dim, which
+        # need not equal n_embd, and c_proj's fan-in follows it back.
         if head_dim is None:
             assert n_embd % n_head == 0
             head_dim = n_embd // n_head
@@ -74,17 +112,11 @@ class CausalSelfAttention(nn.Module):
         self.c_k = Linear(n_embd, n_kv_head * self.head_dim, bias=False) if produces_kv else None
         self.c_v = Linear(n_embd, n_kv_head * self.head_dim, bias=False) if produces_kv else None
         self.c_proj = Linear(n_head * self.head_dim, n_embd, bias=False)
-        kv_dim = n_kv_head * self.head_dim
-        self.value_embed = nn.Embedding(padded_vocab_size, kv_dim) if has_value_embed else None
-        self.ve_gate_channels = 12
-        self.ve_gate = Linear(self.ve_gate_channels, n_kv_head, bias=False) if has_value_embed else None
-        self.gate = None
-        if gate is not None:
-            self.attach_gate(gate)
+        self._attach_features(features)
 
-    def attach_gate(self, gate):
-        gate.bind(self.n_head, self.head_dim)
-        self.gate = gate
+    def bind_layer(self, layer_idx):
+        self.layer_idx = layer_idx
+        self.kv_slot = layer_idx if self._kv_slot is None else self._kv_slot
 
     @torch.no_grad()
     def init_weights(self):
@@ -94,15 +126,7 @@ class CausalSelfAttention(nn.Module):
             torch.nn.init.uniform_(self.c_k.weight, -s, s)
             torch.nn.init.uniform_(self.c_v.weight, -s, s)
         torch.nn.init.zeros_(self.c_proj.weight)  # projections are zero
-        if self.value_embed is not None:
-            torch.nn.init.uniform_(self.value_embed.weight, -s, s)  # init like c_v: uniform with same std
-            if self.runtime.compute_dtype != torch.float16:
-                self.value_embed.to(dtype=self.runtime.compute_dtype)
-        if self.ve_gate is not None:
-            # Gate weights init with small positive values so gates start slightly above neutral
-            torch.nn.init.uniform_(self.ve_gate.weight, 0.0, 0.02)
-        if self.gate is not None:
-            self.gate.init_weights()
+        self._init_features()
 
     def layer_spec(self):
         return AttentionLayerSpec(n_head=self.n_head, n_kv_head=self.n_kv_head, head_dim=self.head_dim,
@@ -117,12 +141,7 @@ class CausalSelfAttention(nn.Module):
         if self.produces_kv:
             k = self.c_k(x).view(B, T, self.n_kv_head, self.head_dim)
             v = self.c_v(x).view(B, T, self.n_kv_head, self.head_dim)
-
-            # Value residual (ResFormer): mix in value embedding with input-dependent gate per head
-            if self.value_embed is not None:
-                ve = self.value_embed(idx).to(x.dtype).view(B, T, self.n_kv_head, self.head_dim)
-                gate = 3 * torch.sigmoid(self.ve_gate(x[..., :self.ve_gate_channels]))  # (B, T, n_kv_head), range (0, 3)
-                v = v + gate.unsqueeze(-1) * ve
+            v = self._hook("values", v, x, idx)
 
             # Apply Rotary Embeddings to queries and keys to get relative positional encoding
             q, k = self.rope(q, k, kv_cache)
@@ -157,8 +176,7 @@ class CausalSelfAttention(nn.Module):
                 window_size=window_size,
             )
 
-        if self.gate is not None:
-            y = self.gate(x, y)
+        y = self._hook("output", y, x)
 
         # Re-assemble the heads and project back to residual stream
         y = y.contiguous().view(B, T, -1)

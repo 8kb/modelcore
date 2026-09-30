@@ -125,7 +125,7 @@ def test_explicit_head_dim_decouples_attention_width_from_n_embd(manager):
     from modelcore.tests.conftest import _gpt_like
     wide = build(manager, _gpt_like(n_head=8, n_kv_head=8, head_dim=16, n_embd=64))
     narrow = build(manager, _gpt_like(n_head=8, n_kv_head=8, head_dim=8, n_embd=64))  # derived value
-    attn = wide.body.blocks[0].attn
+    attn = wide.body.blocks[0].mixer
     assert attn.head_dim == 16
     assert attn.c_q.weight.shape == (8 * 16, 64)
     assert attn.c_proj.weight.shape == (64, 8 * 16)
@@ -146,7 +146,7 @@ def test_rope_head_dim_mismatch_is_a_runtime_error_not_a_silent_wrong_broadcast(
     from modelcore.tests.conftest import _gpt_like
     config = _gpt_like(n_head=4, n_kv_head=4, n_embd=64, head_dim=16)  # shared.rope.head_dim == 16
     for block in config.body.params["blocks"]:
-        block.params["head_dim"] = 8  # mismatched against shared.rope
+        block.params["mixer"].params["head_dim"] = 8  # mismatched against shared.rope
     assert manager.validate_config(config).ok
     model = build(manager, config)
     with pytest.raises(RuntimeError):
@@ -160,7 +160,7 @@ def test_head_dim_none_is_bit_identical_to_the_old_derive_only_behavior(manager)
     explicit = _gpt_like(n_head=4, n_kv_head=4, n_embd=64, head_dim=16)  # 64 // 4 == 16
     derived = _gpt_like(n_head=4, n_kv_head=4, n_embd=64, head_dim=16)
     for block in derived.body.params["blocks"]:
-        block.params["head_dim"] = None
+        block.params["mixer"].params["head_dim"] = None
     a = build(manager, explicit, seed=7)
     b = build(manager, derived, seed=7)
     for (na, pa), (nb, pb) in zip(a.named_parameters(), b.named_parameters()):

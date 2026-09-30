@@ -3,7 +3,8 @@ validate_config(): walks a ModelConfig tree and returns every problem found (mod
 ValidationReport), never just the first. Split the way every other part of modelcore is:
 
 - Structural checks (this module): input/body/output present, every #type registered, every
-  needed build-context value available, no unknown or missing constructor params. These apply to
+  needed build-context value available, no unknown or missing constructor params, and a host's
+  `features` list holding only features whose hooks the host exposes, each type at most once. These apply to
   any component uniformly, so core owns them.
 - Semantic checks (each component's own `validate(params, ctx)`, registered alongside it in
   modelcore.catalog): "n_embd must be divisible by n_head", "a KV-sharing consumer can't have its
@@ -18,6 +19,7 @@ import dataclasses
 import inspect
 
 from modelcore.catalog import get_component, registered_types
+from modelcore.components.contracts import BaseFeature
 from modelcore.config.spec import TEMPLATES, ComponentSpec
 from modelcore.errors import ConfigError, ValidationReport
 
@@ -63,9 +65,40 @@ def _validate_spec(spec, ctx, path, errors):
         for name in missing:
             errors.append(ConfigError(path, f"{spec.type!r} missing required param {name!r}"))
 
+    _validate_features(cls, spec, path, errors)
+
     if validate is not None:
         for message in (validate(spec.params, ctx) or []):
             errors.append(ConfigError(path, message))
+
+
+def _validate_features(cls, spec, path, errors):
+    """The feature protocol's structural half: a host's `features` is a list of specs, each a
+    registered BaseFeature whose HOOKS the host's HOOK_POINTS cover, no type twice (they are keyed
+    by #type in the host's ModuleDict). A new hook point is a code change on the host, never here."""
+    features = spec.params.get("features")
+    if features is None:
+        return
+    if not isinstance(features, list):
+        errors.append(ConfigError(f"{path}.features", f"must be a list of feature specs, got {type(features).__name__}"))
+        return
+    host_points = set(getattr(cls, "HOOK_POINTS", ()))
+    seen = set()
+    for i, feature in enumerate(features):
+        fpath = f"{path}.features[{i}]"
+        if not isinstance(feature, ComponentSpec) or feature.type not in registered_types():
+            continue  # already reported by the nested-spec pass
+        if feature.type in seen:
+            errors.append(ConfigError(fpath, f"duplicate feature {feature.type!r}"))
+        seen.add(feature.type)
+        fcls = get_component(feature.type)[0]
+        if not issubclass(fcls, BaseFeature):
+            errors.append(ConfigError(fpath, f"{feature.type!r} is not a feature"))
+            continue
+        missing = sorted(set(fcls.HOOKS) - host_points)
+        if missing:
+            errors.append(ConfigError(fpath, f"{spec.type!r} does not expose hook(s) {missing} that feature "
+                                             f"{feature.type!r} needs (it exposes {sorted(host_points)})"))
 
 
 def _collect_block_specs(spec, path):
@@ -87,9 +120,13 @@ def _collect_block_specs(spec, path):
     return found
 
 
+def _mixer_cls(mixer):
+    return get_component(mixer.type)[0] if mixer.type in registered_types() else None
+
+
 def _validate_kv_layout(body, n_embd, errors):
-    """Structural cross-layer checks -- computed directly from block spec params (n_head,
-    n_kv_head, head_dim, window, kv_slot, produces_kv), without building a real model, so a bad
+    """Structural cross-layer checks -- computed directly from each block's attention-mixer params
+    (n_head, n_kv_head, head_dim, window, kv_slot, produces_kv), without building a real model, so a bad
     config is caught before any tensor is allocated. Mirrors what modelcore.stats.kv_cache_spec()
     would otherwise raise an AssertionError for at model-build time.
 
@@ -104,7 +141,10 @@ def _validate_kv_layout(body, n_embd, errors):
         return
     head_dims, n_kv_heads, slots = set(), set(), []
     for i, (path, block_spec) in enumerate(blocks):
-        p = block_spec.params
+        mixer = block_spec.params.get("mixer") if isinstance(block_spec, ComponentSpec) else None
+        if not isinstance(mixer, ComponentSpec) or not getattr(_mixer_cls(mixer), "HAS_KV_SLOT", False):
+            continue  # a mixer with no KV cache takes no slot
+        p = mixer.params
         n_head = p.get("n_head")
         n_kv_head = p.get("n_kv_head", n_head)
         head_dim = p.get("head_dim")
@@ -114,7 +154,7 @@ def _validate_kv_layout(body, n_embd, errors):
             head_dims.add(head_dim)
         if n_kv_head is not None:
             n_kv_heads.add(n_kv_head)
-        kv_slot = p.get("kv_slot", i)
+        kv_slot = p.get("kv_slot")
         slots.append(kv_slot if kv_slot is not None else i)
         produces_kv = p.get("produces_kv", True)
         if not produces_kv and kv_slot is not None and kv_slot >= i:

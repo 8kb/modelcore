@@ -18,8 +18,9 @@ from dataclasses import dataclass, field
 
 TYPE_KEY = "#type"
 FORMAT_V1 = "modelcore.v1"
-FORMAT = "modelcore.v2"  # stamped by to_dict(); from_dict dispatches on it (see ModelConfig.from_dict)
-SUPPORTED_FORMATS = (FORMAT_V1, FORMAT)
+FORMAT_V2 = "modelcore.v2"
+FORMAT = "modelcore.v3"  # stamped by to_dict(); from_dict dispatches on it (see ModelConfig.from_dict)
+SUPPORTED_FORMATS = (FORMAT_V1, FORMAT_V2, FORMAT)
 COMMENT_PREFIX = "_"     # a key starting with this is a freeform comment, never a parameter
 # What ModelConfig.template may say about how a model is talked to. Declarative only for now:
 # "base" is plain completion; "nanochat" is the <|user_start|>... conversation format with
@@ -152,7 +153,7 @@ def _count_blocks(spec) -> int:
     return total
 
 
-# Top-level keys a v2 dict may carry (besides "format" and `_` comments). Anything else is an error
+# Top-level keys a v3 dict may carry (besides "format" and `_` comments). Anything else is an error
 # rather than being silently dropped -- a comment is *explicitly* a `_` key, so a stray key that
 # isn't one is a mistake, and dropping it would also lose it on the next save.
 _REQUIRED_KEYS = ("sequence_len", "vocab_size", "n_embd", "pad_vocab_size_to", "template",
@@ -163,8 +164,8 @@ _OPTIONAL_KEYS = ("reference", "shared", "adapters", "frozen", "meta", "tokenize
 @dataclass(kw_only=True)
 class ModelConfig:
     """A materialized architecture tree -- the only shape modelcore knows how to build. Nothing
-    here has a default that changes the architecture: every value is stated, and a v2 dict that
-    omits one is rejected (only modelcore.config.upgrade, converting a v1 dict, may supply one).
+    here has a default that changes the architecture: every value is stated, and a v3 dict that
+    omits one is rejected (only modelcore.config.upgrade, converting an older dict, may supply one).
 
     `reference` optionally records how this config was produced (`{"preset": name, "kwargs":
     {...}}`, stamped by whatever depth-dial layer built it outside core) so a muP scaling-law
@@ -220,8 +221,11 @@ class ModelConfig:
         assert self.input is not None and self.body is not None and self.output is not None, (
             "ModelConfig.to_dict() requires input/body/output to already be set"
         )
+        from modelcore.config.upgrade import has_v2_types
         d = {
-            "format": FORMAT, **self.comments,
+            # A tree still built from v2 block types (a host that hasn't migrated) is a v2 tree:
+            # stamp it as one so from_dict carries it forward instead of mislabeling it.
+            "format": FORMAT_V2 if has_v2_types(self) else FORMAT, **self.comments,
             "sequence_len": self.sequence_len, "vocab_size": self.vocab_size, "n_embd": self.n_embd,
             "pad_vocab_size_to": self.pad_vocab_size_to, "template": self.template,
             "reference": self.reference,
@@ -243,18 +247,18 @@ class ModelConfig:
 
     @classmethod
     def from_dict(cls, d: dict) -> "ModelConfig":
-        """Dispatches on d["format"]: "modelcore.v2" parses as-is; "modelcore.v1" -- or no "format"
-        key at all, which is what a v1 dict looked like to this method before it read the key --
-        goes through modelcore.config.upgrade first, the one place defaults are allowed; anything
-        else is an error. Missing required keys and unknown non-comment keys are both errors, each
+        """Dispatches on d["format"]: "modelcore.v3" parses as-is; "modelcore.v2" and "modelcore.v1"
+        -- or no "format" key at all, which is what a v1 dict looked like to this method before it
+        read the key -- go through modelcore.config.upgrade first, the one place defaults are
+        allowed; anything else is an error. Missing required keys and unknown non-comment keys are both errors, each
         reported with every offender named (not a bare KeyError on the first)."""
         d = dict(d)
         fmt = d.get("format", FORMAT_V1)
         if fmt not in SUPPORTED_FORMATS:
             raise ValueError(f"unsupported config format {fmt!r}; supported: {list(SUPPORTED_FORMATS)}")
-        if fmt == FORMAT_V1:
-            from modelcore.config.upgrade import upgrade_v1_to_v2
-            d = upgrade_v1_to_v2(d)
+        if fmt != FORMAT:
+            from modelcore.config.upgrade import upgrade_to_v3
+            d = upgrade_to_v3(d)
         d.pop("format")
         data, comments = _split_comments(d)
         unknown = sorted(set(data) - set(_REQUIRED_KEYS) - set(_OPTIONAL_KEYS))
@@ -265,7 +269,7 @@ class ModelConfig:
             )
         missing = [k for k in _REQUIRED_KEYS if k not in data]
         if missing:
-            raise ValueError(f"a {FORMAT} config is missing required key(s) {missing} -- v2 has no defaults")
+            raise ValueError(f"a {FORMAT} config is missing required key(s) {missing} -- v3 has no defaults")
         return cls(
             sequence_len=data["sequence_len"], vocab_size=data["vocab_size"], n_embd=data["n_embd"],
             pad_vocab_size_to=data["pad_vocab_size_to"], template=data["template"],

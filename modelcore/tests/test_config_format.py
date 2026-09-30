@@ -1,6 +1,6 @@
 """
-The config *format*: modelcore.v2 serialization, `_` comments, the v1 -> v2 upgrade, and the rule
-that a v2 tree has no defaults. Before this file nothing in modelcore's own suite exercised
+The config *format*: modelcore.v3 serialization, `_` comments, the v1 -> v2 -> v3 upgrades, and the
+rule that a v3 tree has no defaults. Before this file nothing in modelcore's own suite exercised
 to_dict/from_dict at all -- the only thing pinning it was a host's checkpoint round-trip test.
 
 python -m pytest modelcore/tests/test_config_format.py -v
@@ -12,9 +12,10 @@ import pytest
 import torch
 
 from modelcore import AdapterSpec, ComponentSpec, ModelConfig
-from modelcore.config.spec import FORMAT, FORMAT_V1, SUPPORTED_FORMATS, TEMPLATES
-from modelcore.config.upgrade import upgrade_v1_to_v2
+from modelcore.config.spec import FORMAT, FORMAT_V1, FORMAT_V2, SUPPORTED_FORMATS, TEMPLATES
+from modelcore.config.upgrade import upgrade_v1_to_v2, upgrade_v2_to_v3
 from modelcore.tests.conftest import FLAVORS, build
+from modelcore.tests.v2_shape import downgrade_v3_to_v2
 
 
 def _json_roundtrip(d):
@@ -22,11 +23,11 @@ def _json_roundtrip(d):
 
 
 # -----------------------------------------------------------------------------
-# v2 round trip
+# v3 round trip
 
-def test_v2_round_trip_is_lossless_for_every_flavor(config):
+def test_v3_round_trip_is_lossless_for_every_flavor(config):
     d = config.to_dict()
-    assert d["format"] == FORMAT == "modelcore.v2"
+    assert d["format"] == FORMAT == "modelcore.v3"
     again = ModelConfig.from_dict(_json_roundtrip(d))
     assert again.to_dict() == d
     assert again == config
@@ -60,7 +61,8 @@ def _commented():
     config.input.comments = {"_note": "on the embedding"}
     block = config.body.params["blocks"][0]
     block.comments = {"_comment": "on a block"}
-    block.params["mlp"].comments = {"_comment": "on the nested mlp"}
+    block.params["ffn"].comments = {"_comment": "on the nested mlp"}
+    block.params["mixer"].comments = {"_comment": "on a mixer"}
     config.adapters[0].comments = {"_note": "on an adapter"}
     config.adapters[0].params_comments = {"_note": "inside adapter params"}
     return config
@@ -72,7 +74,8 @@ def test_comments_round_trip_at_every_level():
     assert d["_comment"] == "top level"
     assert d["shared"]["rope"]["_note"] == "on a shared component"
     assert d["body"]["blocks"][0]["_comment"] == "on a block"
-    assert d["body"]["blocks"][0]["mlp"]["_comment"] == "on the nested mlp"
+    assert d["body"]["blocks"][0]["ffn"]["_comment"] == "on the nested mlp"
+    assert d["body"]["blocks"][0]["mixer"]["_comment"] == "on a mixer"
     assert d["adapters"][0]["_note"] == "on an adapter"
     assert d["adapters"][0]["params"]["_note"] == "inside adapter params"
     again = ModelConfig.from_dict(d)
@@ -85,7 +88,7 @@ def test_a_comment_can_never_reach_a_constructor_or_fail_validation(manager):
     constructor kwargs (which validation would flag as "no such param") and don't stop a build."""
     config = ModelConfig.from_dict(_json_roundtrip(_commented().to_dict()))
     block = config.body.params["blocks"][0]
-    assert "_comment" not in block.params and "_comment" not in block.params["mlp"].params
+    assert "_comment" not in block.params and "_comment" not in block.params["ffn"].params
     assert "_note" not in config.adapters[0].params
     assert manager.validate_config(config).ok
     build(manager, config)
@@ -128,15 +131,15 @@ def test_underscore_top_level_key_is_a_comment_not_an_error(config):
 
 @pytest.mark.parametrize("missing", ["template", "pad_vocab_size_to", "sequence_len", "vocab_size", "n_embd",
                                      "input", "body", "output"])
-def test_v2_dict_missing_a_required_key_is_rejected(config, missing):
+def test_v3_dict_missing_a_required_key_is_rejected(config, missing):
     d = config.to_dict()
     del d[missing]
-    with pytest.raises(ValueError, match="v2 has no defaults") as e:
+    with pytest.raises(ValueError, match="v3 has no defaults") as e:
         ModelConfig.from_dict(d)
     assert missing in str(e.value)
 
 
-def test_v2_adapter_must_state_enabled():
+def test_adapter_must_state_enabled():
     d = FLAVORS["gpt_lora"]().to_dict()
     del d["adapters"][0]["enabled"]
     with pytest.raises(KeyError):
@@ -144,19 +147,19 @@ def test_v2_adapter_must_state_enabled():
 
 
 # -----------------------------------------------------------------------------
-# a v2 tree has no defaults: what a config omits, validation rejects
+# a v3 tree has no defaults: what a config omits, validation rejects
 
 def _validation_messages(manager, config):
     report = manager.validate_config(config)
     return report, " | ".join(f"{e.path}: {e.message}" for e in report.errors)
 
 
-def test_block_without_mlp_is_rejected(manager):
+def test_block_without_ffn_is_rejected(manager):
     for flavor in ("gpt", "llama"):
         config = FLAVORS[flavor]()
-        del config.body.params["blocks"][0].params["mlp"]
+        del config.body.params["blocks"][0].params["ffn"]
         report, messages = _validation_messages(manager, config)
-        assert not report.ok and "missing required param 'mlp'" in messages
+        assert not report.ok and "missing required param 'ffn'" in messages
         with pytest.raises(ValueError):
             manager.create_model(config, device=torch.device("cpu"))
 
@@ -180,6 +183,10 @@ def _target(config, where):
         return config.shared["rope"]
     if where == "block0":
         return config.body.params["blocks"][0]
+    if where == "mixer0":
+        return config.body.params["blocks"][0].params["mixer"]
+    if where == "backout":
+        return config.body.params["features"][0]
     raise AssertionError(where)
 
 
@@ -187,11 +194,14 @@ def _target(config, where):
     ("gpt", "output", "softcap"),
     ("gpt", "input", "smear"),
     ("gpt", "rope", "over_compute"),
-    ("gpt", "body", "backout_lambda_init"),
-    ("llama", "block0", "kv_slot"),
-    ("llama", "block0", "produces_kv"),
-    ("gpt", "block0", "head_dim"),
-    ("llama", "block0", "head_dim"),
+    ("gpt", "backout", "backout_lambda_init"),
+    ("llama", "mixer0", "kv_slot"),
+    ("llama", "mixer0", "produces_kv"),
+    ("gpt", "mixer0", "head_dim"),
+    ("llama", "mixer0", "head_dim"),
+    ("llama", "mixer0", "features"),
+    ("llama", "block0", "features"),
+    ("llama", "body", "features"),
 ])
 def test_formerly_defaulted_params_are_now_required(manager, flavor, where, param):
     config = FLAVORS[flavor]()
@@ -212,14 +222,14 @@ def test_template_must_be_a_supported_one(manager):
 
 def test_mlp_spec_is_validated(manager):
     config = FLAVORS["gpt"]()
-    mlp = config.body.params["blocks"][0].params["mlp"]
+    mlp = config.body.params["blocks"][0].params["ffn"]
     mlp.params["activation"] = "swish"
     mlp.params["hidden_dim"] = 0
     report, messages = _validation_messages(manager, config)
     assert not report.ok and "activation must be one of" in messages and "hidden_dim must be a positive" in messages
     # a gated mlp does not take relu2 (that is a plain-mlp activation)
     config = FLAVORS["llama"]()
-    config.body.params["blocks"][0].params["mlp"].params["activation"] = "relu2"
+    config.body.params["blocks"][0].params["ffn"].params["activation"] = "relu2"
     report, _ = _validation_messages(manager, config)
     assert not report.ok
 
@@ -238,7 +248,7 @@ def test_layer_norm_eps_must_be_a_number_but_rms_norm_may_be_null(manager):
 def test_nested_mlp_spec_params_reach_the_module(manager):
     config = FLAVORS["gpt_gated_mlp"]()
     model = build(manager, config)
-    mlp = model.body.blocks[0].mlp
+    mlp = model.body.blocks[0].ffn
     assert type(mlp).__name__ == "GatedMLP" and mlp.hidden_dim == 100
     assert mlp.gate_proj.weight.shape == (100, config.n_embd)
 
@@ -286,7 +296,7 @@ def _downgrade(node, n_embd, sequence_len):
 
 
 def _as_v1(d):
-    d = copy.deepcopy(d)
+    d = downgrade_v3_to_v2(d)
     n_embd, seq = d["n_embd"], d["sequence_len"]
     d["format"] = FORMAT_V1
     if "gated_" in json.dumps(d["body"]):
@@ -305,11 +315,11 @@ def _as_v1(d):
     return d
 
 
-def test_v1_dict_upgrades_to_exactly_the_v2_dict_for_every_flavor(config):
-    v2 = config.to_dict()
-    v1 = _as_v1(v2)
+def test_v1_dict_upgrades_to_exactly_the_v3_dict_for_every_flavor(config):
+    v3 = config.to_dict()
+    v1 = _as_v1(v3)
     assert v1["format"] == FORMAT_V1
-    assert ModelConfig.from_dict(_json_roundtrip(v1)).to_dict() == v2
+    assert ModelConfig.from_dict(_json_roundtrip(v1)).to_dict() == v3
 
 
 def test_a_dict_with_no_format_key_is_treated_as_v1(config):
@@ -393,11 +403,11 @@ def test_a_v1_config_still_builds_the_same_model_as_the_v2_one(manager):
     """The converter's materialized values must reproduce what v1 hardcoded: same parameters,
     same shapes, and -- given the same weights -- the same logits."""
     for name in ("gpt", "llama", "llama_kvshare", "llama_kvshare_win"):
-        v2 = FLAVORS[name]()
-        upgraded = ModelConfig.from_dict(_as_v1(v2.to_dict()))
-        a, b = build(manager, v2), build(manager, upgraded)
+        v3 = FLAVORS[name]()
+        upgraded = ModelConfig.from_dict(_as_v1(v3.to_dict()))
+        a, b = build(manager, v3), build(manager, upgraded)
         assert {k: v.shape for k, v in a.state_dict().items()} == {k: v.shape for k, v in b.state_dict().items()}
         b.load_state_dict(a.state_dict())
-        idx = torch.randint(0, v2.vocab_size, (2, 8))
+        idx = torch.randint(0, v3.vocab_size, (2, 8))
         with torch.no_grad():
             assert torch.equal(a(idx), b(idx)), name

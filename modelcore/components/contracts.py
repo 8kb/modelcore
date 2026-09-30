@@ -20,9 +20,73 @@ class BaseEmbedding(nn.Module):
         raise NotImplementedError
 
 
+class BaseFeature(nn.Module):
+    """A small, optional trick a host component carries in its `features` list (a gate, a value
+    embedding, per-layer lambdas, ...). HOOKS names the hook points this feature implements, each
+    as a method of the same name; a host declares the points it exposes in HOOK_POINTS and calls
+    every feature at each of them (see FeatureHost). Every hook has the shape
+    `hook(value, *context) -> value`, so several features on one point simply chain in list order.
+    bind() runs once, from the host's constructor, so a feature can size itself off the host's
+    geometry (shapes only -- it may run under torch.device("meta"))."""
+    HOOKS = ()
+
+    def bind(self, host):
+        pass
+
+    def init_weights(self):
+        pass
+
+
+class FeatureHost:
+    """Mixin for a component that carries features. HOOK_POINTS is what the host promises to call;
+    validation rejects a feature whose HOOKS are not a subset of it. Features live in a ModuleDict
+    keyed by their `#type`, so state_dict keys don't depend on list order
+    (`mixer.features.output_gate.proj.weight`)."""
+    HOOK_POINTS = ()
+
+    def _attach_features(self, features):
+        self.features = nn.ModuleDict()
+        for feature in features:
+            self.features[feature.COMPONENT_TYPE] = feature
+            feature.bind(self)
+
+    def _hook(self, point, value, *context):
+        assert point in self.HOOK_POINTS, f"{type(self).__name__} does not expose hook {point!r}"
+        for feature in self.features.values():
+            if point in feature.HOOKS:
+                value = getattr(feature, point)(value, *context)
+        return value
+
+    def _init_features(self):
+        for feature in self.features.values():
+            feature.init_weights()
+
+
+class BaseMixer(nn.Module):
+    """The token-mixing slot of a Block: attention, and later SSMs and convolutions. Owns
+    everything about how positions exchange information -- its own state/geometry (layer_spec())
+    and any per-layer parameter it introduces. `cache` is the inference cache (None in training),
+    `bus` a per-forward dict shared between layers of one stack (KV sharing uses it), `doc_args`
+    the intra-document masking data."""
+
+    def init_weights(self):
+        raise NotImplementedError
+
+    def bind_layer(self, layer_idx):
+        """Called once by the owning Block, so a mixer that needs to know its position (default KV
+        slot) doesn't take it as a config param."""
+
+    def forward(self, x, idx, cache, bus=None, doc_args=None):
+        raise NotImplementedError
+
+    def layer_spec(self):
+        """AttentionLayerSpec for this layer, or None if this mixer holds no KV cache."""
+        return None
+
+
 class BaseBlock(nn.Module):
-    """One residual-stream transform step. Owns everything about its own layer: attention
-    geometry (via layer_spec()) and any per-layer parameter this block introduces."""
+    """One residual-stream transform step. Owns everything about its own layer; its attention
+    geometry, if any, comes from its mixer via layer_spec()."""
 
     def init_weights(self):
         raise NotImplementedError
@@ -31,7 +95,7 @@ class BaseBlock(nn.Module):
         raise NotImplementedError
 
     def layer_spec(self):
-        """AttentionLayerSpec for this layer, or None if this block isn't attention-shaped."""
+        """AttentionLayerSpec for this layer, or None if it holds no KV cache."""
         return None
 
 

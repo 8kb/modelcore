@@ -24,6 +24,7 @@ def register_component(name, needs=(), validate=None):
     def decorator(cls):
         assert name not in _COMPONENT_REGISTRY, f"component type {name!r} already registered"
         _COMPONENT_REGISTRY[name] = (cls, tuple(needs), validate)
+        cls.COMPONENT_TYPE = name  # a host keys its `features` ModuleDict by this
         return cls
     return decorator
 

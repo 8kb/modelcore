@@ -24,13 +24,16 @@ modelcore/
 ├── evaluate.py           evaluate_bpb -- bits-per-byte (ModelManager.evaluate_bpb is the seam)
 ├── config/
 │   ├── spec.py            ComponentSpec, ModelConfig, AttentionLayerSpec
-│   ├── upgrade.py         upgrade_v1_to_v2 -- the ONLY place a default value may be supplied
+│   ├── upgrade.py         upgrade_v1_to_v2 -- the ONLY place a default value may be supplied;
+│   │                      upgrade_v2_to_v3 + remap_v2_name -- restructuring only, pure dict surgery
 │   └── validate.py        validate_config() -- structural + component-owned semantic checks
 ├── catalog.py           component registry: "#type" name -> (cls, needs, validate)
-├── components/           linear, norm, rope, rotary, attention (incl. cross-layer KV sharing),
-│                         attn_gate (output gating, gated_*_block),
-│                         mlp, block, embedding (+smear), unembedding
-├── composers/             base, stack, backout
+├── components/           linear, norm, rope, rotary, attention (the `attention` mixer, incl.
+│                         cross-layer KV sharing), mlp, block (the ONE block class), features
+│                         (output_gate, value_embed, resid_lambdas, backout), embedding (+smear),
+│                         unembedding
+├── composers/             base, stack (the ONE body class)
+├── convert.py              checkpoint converter v1/v2 -> v3 (`python -m modelcore.convert`)
 ├── roles.py               parameter-role protocol (optimizer grouping)
 ├── stats.py               FLOPs/param/KV-bytes accounting, ModelStats
 ├── store.py               ArtifactStore protocol + FileSystemStore
@@ -72,13 +75,13 @@ modelcore/
   than it silently defaulting into the wrong optimizer (e.g. Muon's shape-based matrix grouping).
   See [docs/architecture.md#component-contracts](docs/architecture.md#component-contracts).
 - **A config tree carries only concrete, already-decided values, never a derivation rule — and a
-  v2 tree has no defaults at all.** A default *is* a derivation rule ("if you don't say, it's 4x"),
-  so `mlp`, `shared.norm`, `template`, `softcap`, `smear`, `over_compute`, `backout_lambda_init`,
+  v3 tree has no defaults at all.** A default *is* a derivation rule ("if you don't say, it's 4x"),
+  so `ffn`, `features`, `shared.norm`, `template`, `softcap`, `smear`, `over_compute`, `backout_lambda_init`,
   `kv_slot`/`produces_kv`, `pad_vocab_size_to` and an adapter's `enabled` are all required: omit one
-  and the config is rejected, not completed. **Only `config/upgrade.py` (v1→v2) may supply a value**
+  and the config is rejected, not completed. **Only `config/upgrade.py` may supply a value**
   — its job is to write v1's implicit choices out so an old config builds the same model. Don't add
   a `=default` to a component constructor param that a config can set to save a line in a test.
-  `has_value_embed` is a plain bool per block, `window` a concrete int, `kv_slot`/`produces_kv`
+  a `value_embed` feature is present or absent per layer, `window` a concrete int, `kv_slot`/`produces_kv`
   concrete per-block values — never a pattern string or a fraction a component would need to
   interpret. Every rule that produces these values lives one layer up, in the host application's
   own preset/depth-dial layer (`nanochat/architectures/derive.py`, `tinylab/presets.py`), run once
@@ -87,11 +90,29 @@ modelcore/
   design eliminated.
 - **`window` is `-1` for full attention, never `sequence_len`.** `sequence_len` is the maximum a
   model was trained/allocated for; inference may run shorter, so a window equal to it bakes the
-  training length into the architecture. The v1→v2 converter rewrites `window >= sequence_len` to
+  training length into the architecture. The v1→v2 upgrader rewrites `window >= sequence_len` to
   `-1`; a host preset layer must emit `-1` in the first place.
+- **There is one block class, and a new trick is never a new block type.** `Block` is `mixer` +
+  `ffn` + `features`; "gpt"/"llama"/"gated" are feature sets on it. A new token mixer (Mamba,
+  convolution) is a `BaseMixer` in the `mixer` slot; anything else is a `BaseFeature` in a
+  `features` list, declaring `HOOKS` that the host's `HOOK_POINTS` must cover (validation checks
+  it, and rejects a duplicate type). A new hook point is a code change on the host, never a format
+  change. Features sit in a `ModuleDict` keyed by `#type`, so state-dict keys don't depend on list
+  order. `gpt_block`/`plain_block`/`gated_*_block`/the `backout` composer exist only as v2 names in
+  `upgrade_v2_to_v3` — no class is registered behind them. Full contract in
+  [docs/architecture.md](docs/architecture.md#blocks-mixers-and-features).
+- **A pre-v3 checkpoint's weights need the converter; its config does not.** `ModelConfig.from_dict`
+  upgrades any v1/v2 dict (and `ModelManager` upgrades a `ModelConfig` still built from v2
+  `ComponentSpec`s), but `load_model` on a pre-v3 checkpoint raises, pointing at
+  `modelcore.convert` (`attn.`→`mixer.`, `mlp.`→`ffn.`, features under `features.<#type>.`).
+  Optimizer state is **not** converted (positional), so a converted checkpoint can't resume
+  training. `remap_v2_name` is shared by the config upgrader (adapter/frozen FQNs) and the
+  converter (state keys) — keep them one function.
+- **In a model where not every layer is attention, `kv_slot` is stated explicitly.** `kv_slot: null`
+  means "my `layer_idx`", which is only a contiguous slot number when every layer holds a KV cache.
 - **A block's `head_dim` and `shared.rope`'s own `head_dim` are stated independently and never
   cross-checked.** `head_dim=null` on a block derives `n_embd // n_head` (what every config did
-  before this param existed — the v1→v2 converter writes `null`, never a computed number); an
+  before this param existed — the v1→v2 upgrader writes `null`, never a computed number); an
   explicit value decouples attention width from `n_head` entirely, e.g. more heads at a fixed
   `head_dim` that no longer equals `n_embd // n_head`. `_validate_kv_layout` requires uniform
   `head_dim` *across blocks* (what the KV cache needs), but nothing checks a block's `head_dim`

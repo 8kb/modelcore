@@ -3,4 +3,4 @@ Import every component module so its @register_component decorator runs and popu
 modelcore.catalog. Each component self-registers at its own class definition -- this package
 just needs to import them all once.
 """
-from modelcore.components import attention, attn_gate, block, embedding, linear, mlp, norm, rope, rotary, unembedding  # noqa: F401
+from modelcore.components import attention, block, embedding, features, linear, mlp, norm, rope, rotary, unembedding  # noqa: F401

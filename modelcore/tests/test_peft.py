@@ -18,7 +18,7 @@ from modelcore.store import FileSystemStore
 from modelcore.tests.conftest import FLAVORS, build
 
 
-def _lora_config(r=4, alpha=8, freeze_base=True, targets=("body.blocks.0.attn.c_proj",),
+def _lora_config(r=4, alpha=8, freeze_base=True, targets=("body.blocks.0.mixer.c_proj",),
                   names=None, dora=False):
     # c_proj (not c_q/c_k/c_v) is the default target deliberately: modelcore zero-initializes
     # every block's final residual projection (CausalSelfAttention.c_proj, MLP.c_proj) as an
@@ -50,7 +50,7 @@ def test_apply_adapters_converts_target_and_collect_param_roles_succeeds(manager
     targets = find_adapters(model)
     assert len(targets) == 1
     fqn, module = targets[0]
-    assert fqn == "body.blocks.0.attn.c_proj"
+    assert fqn == "body.blocks.0.mixer.c_proj"
     assert isinstance(module, AdapterLinear)
     assert "t0" in module.deltas
     roles = collect_param_roles(model)  # must not raise
@@ -141,7 +141,7 @@ def test_disabled_adapter_forward_equals_base_even_when_trained(manager):
 # The actual feature: hand-edit a checkpoint's config, reload, no state-dict surgery
 
 def test_hand_edit_disable_then_add_adapter_round_trips_through_reload(manager, tmp_path):
-    config = _lora_config(targets=("body.blocks.0.attn.c_proj", "body.blocks.2.mlp.c_proj"), names=["t0", "t1"])
+    config = _lora_config(targets=("body.blocks.0.mixer.c_proj", "body.blocks.2.ffn.c_proj"), names=["t0", "t1"])
     model = build(manager, config, seed=0)
     # Simulate "trained": perturb both adapters away from their zero-init no-op so enabling/
     # disabling them is numerically observable below.
@@ -162,14 +162,14 @@ def test_hand_edit_disable_then_add_adapter_round_trips_through_reload(manager, 
     edited["adapters"][0]["enabled"] = False
     disabled_model = manager.load_model(store, device=torch.device("cpu"), config=manager.config_from_dict(edited))
     reloaded_targets = dict(find_adapters(disabled_model))
-    assert reloaded_targets["body.blocks.0.attn.c_proj"].enabled["t0"] is False
-    assert reloaded_targets["body.blocks.2.mlp.c_proj"].enabled["t1"] is True
+    assert reloaded_targets["body.blocks.0.mixer.c_proj"].enabled["t0"] is False
+    assert reloaded_targets["body.blocks.2.ffn.c_proj"].enabled["t1"] is True
     with torch.no_grad():
         disabled_out = disabled_model(idx)
     assert not torch.equal(disabled_out, trained_out)
 
     # Must match manually disabling t0 on the in-memory (pre-save) model.
-    target_module = dict(find_adapters(model))["body.blocks.0.attn.c_proj"]
+    target_module = dict(find_adapters(model))["body.blocks.0.mixer.c_proj"]
     target_module.set_enabled("t0", False)
     with torch.no_grad():
         expected = model(idx)
@@ -180,12 +180,12 @@ def test_hand_edit_disable_then_add_adapter_round_trips_through_reload(manager, 
     # must initialize to a true no-op, so the reloaded output equals the original trained output.
     edited2 = store.read_config()
     edited2["adapters"].append({
-        "target": "body.blocks.0.attn.c_proj", "name": "fresh", "type": "lora",
+        "target": "body.blocks.0.mixer.c_proj", "name": "fresh", "type": "lora",
         "params": {"r": 2, "alpha": 4}, "enabled": True,
     })
     added_model = manager.load_model(store, device=torch.device("cpu"), config=manager.config_from_dict(edited2))
     added_targets = dict(find_adapters(added_model))
-    assert "fresh" in added_targets["body.blocks.0.attn.c_proj"].deltas
+    assert "fresh" in added_targets["body.blocks.0.mixer.c_proj"].deltas
     with torch.no_grad():
         added_out = added_model(idx)
     assert torch.equal(added_out, trained_out)
@@ -212,7 +212,7 @@ def test_merge_adapters_output_matches_unmerged_forward(manager):
 
 
 def test_adapters_disabled_context_manager_round_trips_state(manager):
-    config = _lora_config(targets=("body.blocks.0.attn.c_q", "body.blocks.2.attn.c_v"), names=["t0", "t1"])
+    config = _lora_config(targets=("body.blocks.0.mixer.c_q", "body.blocks.2.mixer.c_v"), names=["t0", "t1"])
     model = build(manager, config, seed=0)
     _, mod0 = find_adapters(model)[0]
     _, mod1 = find_adapters(model)[1]
@@ -281,7 +281,7 @@ def test_validate_config_accepts_a_valid_lora_config(manager):
 
 def test_validate_config_reports_bad_adapter_target(manager):
     config = _lora_config()
-    config.adapters[0].target = "body.blocks.0.attn.nonexistent"
+    config.adapters[0].target = "body.blocks.0.mixer.nonexistent"
     report = manager.validate_config(config)
     assert not report.ok
     assert any("no such module" in e.message for e in report.errors)
@@ -312,7 +312,7 @@ def test_validate_config_reports_bad_adapter_params(manager):
 
 
 def test_validate_config_reports_duplicate_adapter_name_on_same_target(manager):
-    config = _lora_config(targets=("body.blocks.0.attn.c_q", "body.blocks.0.attn.c_q"), names=["dup", "dup"])
+    config = _lora_config(targets=("body.blocks.0.mixer.c_q", "body.blocks.0.mixer.c_q"), names=["dup", "dup"])
     report = manager.validate_config(config)
     assert not report.ok
     assert any("already used on target" in e.message for e in report.errors)

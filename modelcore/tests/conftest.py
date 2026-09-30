@@ -15,28 +15,41 @@ from modelcore import AdapterSpec, ComponentSpec, ModelConfig, ModelManager
 RMS_NORM = lambda: ComponentSpec("rms_norm", {"eps": None})
 
 
+def _mixer(n_head, n_kv_head, head_dim, window, kv_slot=None, produces_kv=True, features=()):
+    return ComponentSpec("attention", {"n_head": n_head, "n_kv_head": n_kv_head, "head_dim": head_dim,
+                                       "window": window, "kv_slot": kv_slot, "produces_kv": produces_kv,
+                                       "features": [f() for f in features]})
+
+
 def _gpt_like(n_layer=4, n_head=2, n_kv_head=2, n_embd=64, head_dim=32, vocab_size=128, sequence_len=32, window=-1,
               mlp=None, norm=None, attn_gate=None):
-    # A v2 tree states everything: an mlp per block, a shared norm, a template, no constructor
+    # A v3 tree states everything: an mlp per block, a shared norm, a template, no constructor
     # defaults. `mlp`/`norm` are overridable so a flavor can exercise a non-default choice.
+    # "gpt" is a feature set on the one Block class: resid_lambdas on the block, value_embed (on
+    # alternating layers) on the attention, backout on the stack.
     mlp = mlp or (lambda: ComponentSpec("mlp", {"activation": "relu2", "hidden_dim": 4 * n_embd}))
-    blocks = [
-        ComponentSpec("gpt_block" if attn_gate is None else "gated_gpt_block", {
-            "layer_idx": i, "n_head": n_head, "n_kv_head": n_kv_head, "window": window,
-            "has_value_embed": (i % 2 == (n_layer - 1) % 2),
-            "resid_lambda_init": 1.15 - 0.10 * i / max(n_layer - 1, 1),
-            "x0_lambda_init": 0.20 - 0.15 * i / max(n_layer - 1, 1),
-            "mlp": mlp(), "head_dim": head_dim,
-            **({} if attn_gate is None else {"attn_gate": attn_gate()}),
-        })
-        for i in range(n_layer)
-    ]
+    blocks = []
+    for i in range(n_layer):
+        mixer_features = []
+        if i % 2 == (n_layer - 1) % 2:
+            mixer_features.append(lambda: ComponentSpec("value_embed", {"gate_channels": 12}))
+        if attn_gate is not None:
+            mixer_features.append(attn_gate)
+        blocks.append(ComponentSpec("block", {
+            "layer_idx": i,
+            "mixer": _mixer(n_head, n_kv_head, head_dim, window, features=mixer_features),
+            "ffn": mlp(),
+            "features": [ComponentSpec("resid_lambdas", {
+                "resid_lambda_init": 1.15 - 0.10 * i / max(n_layer - 1, 1),
+                "x0_lambda_init": 0.20 - 0.15 * i / max(n_layer - 1, 1)})],
+        }))
     return ModelConfig(
         sequence_len=sequence_len, vocab_size=vocab_size, n_embd=n_embd, pad_vocab_size_to=64, template="base",
         shared={"rope": ComponentSpec("rotary", {"head_dim": head_dim, "over_compute": 10}),
                 "norm": (norm or RMS_NORM)()},
         input=ComponentSpec("token_embedding", {"smear": True}),
-        body=ComponentSpec("backout", {"backout_layer": n_layer // 2, "backout_lambda_init": 0.2, "blocks": blocks}),
+        body=ComponentSpec("stack", {"blocks": blocks, "features": [
+            ComponentSpec("backout", {"backout_layer": n_layer // 2, "backout_lambda_init": 0.2})]}),
         output=ComponentSpec("lm_head", {"softcap": 15}),
     )
 
@@ -44,24 +57,25 @@ def _gpt_like(n_layer=4, n_head=2, n_kv_head=2, n_embd=64, head_dim=32, vocab_si
 def _plain_like(n_layer=4, n_head=2, n_kv_head=2, n_embd=64, head_dim=32, vocab_size=128, sequence_len=32,
                  window=-1, kv_slots=None, mlp=None, norm=None, attn_gate=None):
     # Llama-style FFN width: 2/3 of 4x, rounded up to a multiple of 256 -- computed here, by the
-    # test's own "host layer", not by modelcore.
+    # test's own "host layer", not by modelcore. "llama" is the same Block class with no features.
     hidden = 256 * ((int(2 * (4 * n_embd) / 3) + 255) // 256)
     mlp = mlp or (lambda: ComponentSpec("gated_mlp", {"activation": "silu", "hidden_dim": hidden}))
     blocks = []
     for i in range(n_layer):
-        params = {"layer_idx": i, "n_head": n_head, "n_kv_head": n_kv_head, "window": window, "mlp": mlp(),
-                  "head_dim": head_dim,
-                  "kv_slot": None if kv_slots is None else kv_slots[i],
-                  "produces_kv": True if kv_slots is None else kv_slots[i] == i}
-        if attn_gate is not None:
-            params["attn_gate"] = attn_gate()
-        blocks.append(ComponentSpec("plain_block" if attn_gate is None else "gated_plain_block", params))
+        kv_slot = None if kv_slots is None else kv_slots[i]
+        produces_kv = True if kv_slots is None else kv_slots[i] == i
+        blocks.append(ComponentSpec("block", {
+            "layer_idx": i,
+            "mixer": _mixer(n_head, n_kv_head, head_dim, window, kv_slot, produces_kv,
+                            features=[] if attn_gate is None else [attn_gate]),
+            "ffn": mlp(), "features": [],
+        }))
     return ModelConfig(
         sequence_len=sequence_len, vocab_size=vocab_size, n_embd=n_embd, pad_vocab_size_to=64, template="base",
         shared={"rope": ComponentSpec("rotary", {"head_dim": head_dim, "over_compute": 10}),
                 "norm": (norm or RMS_NORM)()},
         input=ComponentSpec("token_embedding", {"smear": False}),
-        body=ComponentSpec("stack", {"blocks": blocks}),
+        body=ComponentSpec("stack", {"blocks": blocks, "features": []}),
         output=ComponentSpec("lm_head", {"softcap": 15}),
     )
 
@@ -75,20 +89,20 @@ def _gpt_lora():
     config = _gpt_like()
     config.frozen = ["body"]
     config.adapters = [
-        AdapterSpec(target="body.blocks.0.attn.c_q", name="t0", type="lora", params={"r": 4, "alpha": 8}),
-        AdapterSpec(target="body.blocks.0.attn.c_v", name="t0", type="lora", params={"r": 4, "alpha": 8}),
+        AdapterSpec(target="body.blocks.0.mixer.c_q", name="t0", type="lora", params={"r": 4, "alpha": 8}),
+        AdapterSpec(target="body.blocks.0.mixer.c_v", name="t0", type="lora", params={"r": 4, "alpha": 8}),
     ]
     return config
 
 
 def _gpt_gated_mlp():
-    """gpt_block with a gated GELU FFN at an unrounded, non-4x width -- proves the mlp slot is
+    """gpt-style blocks with a gated GELU FFN at an unrounded, non-4x width -- proves the mlp slot is
     genuinely free, not just a re-spelling of the two hardcoded shapes."""
     return _gpt_like(mlp=lambda: ComponentSpec("gated_mlp", {"activation": "gelu", "hidden_dim": 100}))
 
 
 def _llama_layer_norm():
-    """plain_block with a plain (ungated) SiLU FFN of odd width, under a layer_norm shared norm."""
+    """llama-style blocks with a plain (ungated) SiLU FFN of odd width, under a layer_norm shared norm."""
     return _plain_like(mlp=lambda: ComponentSpec("mlp", {"activation": "silu", "hidden_dim": 90}),
                        norm=lambda: ComponentSpec("layer_norm", {"eps": 1e-5}))
 
@@ -102,7 +116,7 @@ def _gpt_decoupled_head_dim():
 
 
 def _gate(granularity, block_size=None, in_channels=None):
-    return lambda: ComponentSpec("attn_gate", {"granularity": granularity, "block_size": block_size,
+    return lambda: ComponentSpec("output_gate", {"granularity": granularity, "block_size": block_size,
                                                "in_channels": in_channels})
 
 

@@ -5,13 +5,15 @@ Nothing else in modelcore (components, composers, catalog, roles, stats' free fu
 modelcore.precision.fp8) is meant to be used directly from outside the package -- see the module
 docstrings for why each exists, but ModelManager is the seam.
 """
+import re
 from contextlib import contextmanager
 from dataclasses import dataclass
 
 import torch
 
 from modelcore.cache import KVCache
-from modelcore.config.spec import ModelConfig
+from modelcore.config.spec import FORMAT, ModelConfig
+from modelcore.config.upgrade import has_v2_types
 from modelcore.config.validate import validate_config as _validate_config
 from modelcore.errors import ValidationReport
 from modelcore.evaluate import evaluate_bpb as _evaluate_bpb
@@ -40,6 +42,20 @@ def _disabled_adapter_matmul_params(model) -> int:
             if not module.enabled.get(name, True):
                 total += sum(m.weight.numel() for m in delta.modules() if isinstance(m, Linear))
     return total
+
+
+# A state-dict key only a pre-v3 model writes: block submodules attn/mlp (now mixer/ffn) or the
+# body's own backout_lambda (now body.features.backout.backout_lambda).
+_V2_STATE_KEY = re.compile(r"(^|\.)blocks\.\d+\.(attn|mlp)\.|^body\.backout_lambda$")
+
+
+def _v2_checkpoint_error(what: str) -> ValueError:
+    return ValueError(
+        f"{what} is a pre-v3 (modelcore.v1/v2) checkpoint; its weights are stored under the old "
+        f"block layout. Convert it once with modelcore.convert.convert_checkpoint_v2_to_v3(src_store, "
+        f"dst_store) or `python -m modelcore.convert SRC_DIR DST_DIR`, then load the converted copy. "
+        f"(Optimizer state is not converted: a converted checkpoint cannot resume training.)"
+    )
 
 
 @dataclass(frozen=True)
@@ -74,21 +90,30 @@ class ModelManager:
     def config_from_dict(self, d: dict) -> ModelConfig:
         return ModelConfig.from_dict(d)
 
+    def _current(self, config: ModelConfig) -> ModelConfig:
+        """A config a host built from v2 component types (`gpt_block`, `backout`, ...) carried
+        forward to v3 through the dict upgrader -- the same path a v2 file takes. A v3 config is
+        returned as-is. This is what lets a host keep emitting v2 until it chooses to migrate."""
+        return ModelConfig.from_dict(config.to_dict()) if has_v2_types(config) else config
+
     def config_to_dict(self, config: ModelConfig) -> dict:
         return config.to_dict()
 
     def validate_config(self, config: ModelConfig) -> ValidationReport:
-        return _validate_config(config)
+        return _validate_config(self._current(config))
 
-    def _require_valid(self, config: ModelConfig) -> None:
+    def _require_valid(self, config: ModelConfig) -> ModelConfig:
+        """Returns the config to build from (v2 trees carried forward, see _current)."""
+        config = self._current(config)
         report = self.validate_config(config)
         if not report.ok:
             raise ValueError(f"invalid model config:\n{report}")
+        return config
 
     # -- create --
 
     def create_model(self, config: ModelConfig, *, device, seed: int | None = None) -> Model:
-        self._require_valid(config)
+        config = self._require_valid(config)
         with torch.device("meta"):
             model = Model(config, runtime=self.runtime)
         model.to_empty(device=device)
@@ -161,9 +186,14 @@ class ModelManager:
         A config with no adapters takes the exact original strict=True path, byte-identical to
         before this existed."""
         if config is None:
-            config = self.config_from_dict(store.read_config())
-        self._require_valid(config)
+            raw = store.read_config()
+            if raw.get("format") != FORMAT:
+                raise _v2_checkpoint_error("this checkpoint's config")
+            config = self.config_from_dict(raw)
+        config = self._require_valid(config)
         state = store.read_model_state(map_location=device)
+        if any(_V2_STATE_KEY.search(k) for k in state):
+            raise _v2_checkpoint_error("this checkpoint's model state")
         with torch.device("meta"):
             model = Model(config, runtime=self.runtime)
         model.to_empty(device=device)
@@ -226,7 +256,7 @@ class ModelManager:
         exist on disk and take up real memory regardless of whether they currently run), but are
         subtracted out of matmul_params/flops_per_token: a delta that's off doesn't run its
         matmul, so charging FLOPs for it would overstate the actual forward cost."""
-        self._require_valid(config)
+        config = self._require_valid(config)
         with torch.device("meta"):
             model = Model(config, runtime=self.runtime)
         layer_specs = model.layer_specs()

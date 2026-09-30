@@ -22,11 +22,15 @@ modelcore/
 ├── scaling.py            derive_training_plan -- muP horizon/batch-size/LR-scale derivation
 ├── config/
 │   ├── spec.py            ComponentSpec, ModelConfig, AttentionLayerSpec, resolve_reference_config
-│   ├── upgrade.py         upgrade_v1_to_v2 -- the only place a default value may be supplied
+│   ├── upgrade.py         upgrade_v1_to_v2 (the only place a default value may be supplied),
+│   │                      upgrade_v2_to_v3, remap_v2_name (v2 module FQN / state key -> v3)
 │   └── validate.py        validate_config() -- structural + component-owned semantic checks
 ├── catalog.py           component registry: "#type" name -> (cls, needs, validate)
-├── components/           linear, norm, rope, rotary, attention, mlp, block, embedding, unembedding
-├── composers/             base, stack, backout
+├── components/           linear, norm, rope, rotary, attention (the `attention` mixer), mlp, block
+│                         (the one `block` class), features (output_gate, value_embed, resid_lambdas,
+│                         backout), embedding, unembedding
+├── composers/             base, stack (the one body class)
+├── convert.py             convert_checkpoint_v2_to_v3 + `python -m modelcore.convert`
 ├── roles.py               parameter-role protocol (optimizer grouping)
 ├── stats.py               FLOPs/param/KV-bytes accounting, ModelStats
 ├── store.py               ArtifactStore protocol + FileSystemStore (+ read_meta/update_meta,
@@ -131,22 +135,23 @@ tree content.
 
 ### Format versions
 
-`to_dict()` always stamps `"format": "modelcore.v2"`; `from_dict()` dispatches on it:
+`to_dict()` always stamps `"format": "modelcore.v3"` (except for a tree still built from v2 component
+types, which it stamps v2 so it upgrades on load -- see "Migrating from v2" below); `from_dict()`
+dispatches on it:
 
-- `"modelcore.v2"` parses as-is.
+- `"modelcore.v3"` parses as-is.
+- `"modelcore.v2"` goes through `modelcore.config.upgrade.upgrade_v2_to_v3` first.
 - `"modelcore.v1"` — or **no `"format"` key at all**, which is what a v1 dict looks like to this
-  method — goes through `modelcore.config.upgrade.upgrade_v1_to_v2` first, then parses as v2.
+  method — goes through `upgrade_v1_to_v2` and then `upgrade_v2_to_v3`.
 - Anything else raises `ValueError` naming the supported formats.
-
-(The version used to be write-only: stamped on save and discarded on load, so a hypothetical v2 dict
-would have silently loaded as v1. A host branching on `"format" in dict` still works, but should
-branch on the value.)
 
 `upgrade_v1_to_v2` is **the only code in `modelcore` allowed to supply a default value**. A v1 dict
 left a lot implicit — an MLP hardcoded per block type, a free-function norm, constructor defaults
 like `softcap=15` — and the converter writes each of those out, so a v1 config keeps building the
 exact same model (checked bit-for-bit against pre-change weights and logits). It also rewrites
-`window >= sequence_len` to `-1`. A **v2** dict that omits any of them is rejected, not completed.
+`window >= sequence_len` to `-1`. A **v3** dict that omits any of them is rejected, not completed.
+`upgrade_v2_to_v3` supplies no new architecture-affecting value: it restructures (see below) and
+writes `null`/`true`/`[]` where a v2 block hardcoded them.
 
 `ModelConfig.from_dict` also rejects, naming every offender: a missing required key
 (`sequence_len`, `vocab_size`, `n_embd`, `pad_vocab_size_to`, `template`, `input`, `body`, `output`)
@@ -185,8 +190,8 @@ them.
 A block's FFN is a nested spec, and the norm is a shared component, so neither is a hardcoded choice:
 
 ```json
-{ "#type": "gpt_block", "layer_idx": 0, "n_head": 6, "window": -1,
-  "mlp": { "#type": "mlp", "activation": "relu2", "hidden_dim": 3072 } }
+{ "#type": "block", "layer_idx": 0, "mixer": { ... }, "features": [ ... ],
+  "ffn": { "#type": "mlp", "activation": "relu2", "hidden_dim": 3072 } }
 ```
 
 | `#type` | shape | `activation` |
@@ -202,15 +207,58 @@ shared instance adds nothing to `state_dict()` and every existing checkpoint loa
 `rms_norm`'s `"eps": null` means torch's own default — the input dtype's machine epsilon — which is
 what every model trained before norm was configurable used, so it is a real value, not a placeholder.
 
-### Gated attention
+### Blocks, mixers and features
 
-`gated_gpt_block` / `gated_plain_block` are `gpt_block` / `plain_block` plus a required nested
-`attn_gate` spec: after SDPA and before `c_proj`, `y = y * sigmoid(W_g · x[..., :in_channels])`, where
-`x` is the block's normed attention input (Qwen "Gated Attention", G1 placement).
+There is **exactly one block class**: `Block` (`#type: "block"`), a pre-norm residual step
+`x = x + mixer(norm(x)); x = x + ffn(norm(x))`. Everything that used to make one block type differ
+from another is a component in a slot or a **feature**:
 
 ```json
-"attn_gate": {"#type": "attn_gate", "granularity": "block", "block_size": 8, "in_channels": null}
+{ "#type": "block", "layer_idx": 0,
+  "mixer": { "#type": "attention", "n_head": 6, "n_kv_head": 6, "head_dim": null, "window": -1,
+             "kv_slot": null, "produces_kv": true,
+             "features": [ {"#type": "value_embed", "gate_channels": 12},
+                           {"#type": "output_gate", "granularity": "block", "block_size": 8, "in_channels": null} ] },
+  "ffn": { "#type": "mlp", "activation": "relu2", "hidden_dim": 3072 },
+  "features": [ {"#type": "resid_lambdas", "resid_lambda_init": 1.15, "x0_lambda_init": 0.2} ] }
 ```
+
+"gpt" and "llama" are just two feature sets on this class: gpt = `resid_lambdas` on the block plus
+`value_embed` on the attention (and `backout` on the stack); llama = no features; gated = an
+`output_gate` on the attention. `gpt_block`/`plain_block`/`gated_*_block` and the `backout` composer
+exist only as v2 names that `upgrade_v2_to_v3` rewrites — there is no class behind them. There is no
+new block type, now or later: a new token mixer (Mamba, convolutions) is a new **mixer**, a new
+trick is a new **feature**.
+
+**Mixer** (`BaseMixer`): whatever fills the block's `mixer` slot. `forward(x, idx, cache, bus,
+doc_args)`, `layer_spec()` (an `AttentionLayerSpec`, or `None` if it holds no KV cache),
+`init_weights()`, and `bind_layer(layer_idx)` (called by the owning block, so `kv_slot: null` can
+mean "my own slot at my layer_idx" without a mixer taking `layer_idx` as a param). In a model where
+not every layer is attention, `layer_idx` is not a contiguous slot number, so such a config states
+every `kv_slot` explicitly.
+
+**Feature** (`BaseFeature`): a registered component that declares `HOOKS`. A host (`Block`,
+`CausalSelfAttention`, `StackComposer`) declares the `HOOK_POINTS` it exposes and calls every
+feature at each of them (`FeatureHost`); every hook is `hook(value, *context) -> value`, so several
+features on one point chain in list order.
+
+| host | hook | signature | features today |
+|---|---|---|---|
+| `block` | `residual_in` | `(x, x0) -> x` | `resid_lambdas` |
+| `attention` | `values` | `(v, x, idx) -> v` | `value_embed` |
+| `attention` | `output` | `(y, x) -> y`, `y` is `(B, T, H, D)` | `output_gate` |
+| `stack` | `after_block`, `finish` | `(x, i, state) -> x`, `(x, state) -> x` | `backout` |
+
+Validation rejects a feature on a host whose `HOOK_POINTS` don't cover its `HOOKS`, a type listed
+twice, and anything in `features` that isn't a `BaseFeature`. Adding a hook point is a code change
+on the host, never a format change. Features live in a `ModuleDict` keyed by `#type`, so state-dict
+keys don't depend on list order: `body.blocks.0.mixer.features.output_gate.proj.weight`,
+`body.blocks.3.features.resid_lambdas.resid_lambda`, `body.features.backout.backout_lambda`. `stack`
+always threads `x0` (the post-embedding activations) to every block, whether or not a feature
+reads it.
+
+`output_gate` is Qwen "Gated Attention" (G1 placement): after SDPA and before `c_proj`,
+`y = y * sigmoid(W_g · x[..., :in_channels])`, where `x` is the block's normed mixer input.
 
 | `granularity` | gates | `block_size` |
 |---|---|---|
@@ -219,10 +267,34 @@ what every model trained before norm was configurable used, so it is a real valu
 | `block` | `n_head * head_dim / block_size` (contiguous outputs inside a head) | positive int dividing `head_dim` |
 
 `in_channels: null` means all `n_embd` residual channels feed the gate (same "null = derive"
-convention as `head_dim`); otherwise the first `in_channels`. `block_size` is required in every spec.
-The gate projection is a `Linear` (role `matrix`, counted in matmul FLOPs). These are new block types
-rather than a new param on the old ones so every existing v2 config and checkpoint keeps loading
-with no format bump.
+convention as `head_dim`); otherwise the first `in_channels`. `block_size` is required in every
+spec. The gate projection is a `Linear` (role `matrix`, counted in matmul FLOPs). `value_embed` is
+the ResFormer-style value residual, `v += 3*sigmoid(gate(x[..., :gate_channels])) * embed(idx)`
+(`embed` is role `value_embedding`, `gate` a `Linear`); a KV-sharing consumer layer
+(`produces_kv=false`) has no V of its own and can't carry it.
+
+### Migrating from v2
+
+`upgrade_v2_to_v3` (pure dict surgery) rewrites `gpt_block`/`plain_block`/`gated_*` to `block`
+(`n_head`/`n_kv_head`/`head_dim`/`window`/`kv_slot`/`produces_kv` move into a nested `attention`
+mixer, `mlp` becomes `ffn`, `has_value_embed` becomes a `value_embed` feature, `attn_gate` an
+`output_gate`, the lambdas a `resid_lambdas`), and the `backout` composer to a `stack` with a
+`backout` feature. It also rewrites adapter targets and `frozen` FQNs (`remap_v2_name`), so an old
+config carries its adapters forward.
+
+Weights are a **separate, explicit step**: `modelcore.convert.convert_checkpoint_v2_to_v3(src_store,
+dst_store)` (or `python -m modelcore.convert SRC_DIR DST_DIR [--step N]`) renames every state-dict key
+(`attn.` → `mixer.`, `mlp.` → `ffn.`, `attn.gate.` → `mixer.features.output_gate.`,
+`attn.value_embed`/`ve_gate` → `mixer.features.value_embed.embed`/`.gate`, `resid_lambda`/`x0_lambda`
+→ `features.resid_lambdas.*`, `body.backout_lambda` → `body.features.backout.backout_lambda`) and
+writes the upgraded config. `ModelManager.load_model` on a pre-v3 checkpoint raises an error pointing
+at the converter. **Optimizer state is not converted** — it is positional and v3 reaches parameters
+in a different order — so a converted checkpoint can't resume training.
+
+A host that keeps building v2 `ComponentSpec`s needs no change to build models: `ModelManager`
+carries such a config forward through the dict upgrader (`ModelConfig.to_dict` stamps it v2).
+Anything that reads tree internals (a block's `params["window"]`, an adapter FQN like
+`body.blocks.0.attn.c_q`) sees the v3 shape after the upgrade.
 
 ### Only concrete, already-decided values — no rules
 
@@ -230,23 +302,23 @@ A config tree carries no *derivation rules*, only their already-computed output.
 used to be a rule lives outside `modelcore`, run once at tree-expansion time, in the host
 application's own preset/depth-dial layer (`nanochat/architectures/derive.py`, `tinylab/presets.py`):
 
-- `has_value_embed`: a plain `bool` a `gpt_block`'s params carry directly — not `None` meaning
-  "derive the alternating-by-parity pattern from `n_layer`". `Block` (the class backing
-  `"gpt_block"`) doesn't take `n_layer` at all, because it never needs to re-derive anything.
+- a `value_embed` feature present or absent per layer — not a `None` meaning "derive the
+  alternating-by-parity pattern from `n_layer`". `Block` doesn't take `n_layer` at all, because it
+  never needs to re-derive anything.
 - `window`: a concrete int per block, or **`-1` for full context** — never a pattern string like
   `"SSSL"`, and never `sequence_len` as a spelling of "full". `sequence_len` is only the maximum a
   model was trained/allocated for; inference may run shorter, so a window equal to it would bake the
   training length into the architecture.
-- `mlp`: a nested spec stating the activation and inner width — not a `4 * n_embd` a component would
+- `ffn`: a nested spec stating the activation and inner width — not a `4 * n_embd` a component would
   compute for itself.
 - `kv_slot`/`produces_kv`: concrete per-block values — not a `kv_share_frac` float a component
   would need to interpret.
 
-The same rule is why a v2 tree has **no defaults at all**: a default *is* a derivation rule ("if you
-don't say, it's 4x"). Omit `mlp`, `shared.norm`, `template`, or any formerly-defaulted constructor
+The same rule is why a v3 tree has **no defaults at all**: a default *is* a derivation rule ("if you
+don't say, it's 4x"). Omit `ffn`, `features` (an empty list is a value), `shared.norm`, `template`, or any formerly-defaulted constructor
 param (`softcap`, `smear`, `over_compute`, `backout_lambda_init`, `kv_slot`, `produces_kv`,
-`pad_vocab_size_to`, an adapter's `enabled`) and the config is rejected. Only the v1→v2 converter
-above writes those values in.
+`pad_vocab_size_to`, an adapter's `enabled`) and the config is rejected. Only the upgraders above
+write those values in.
 
 This is the fix for the abstraction leak the whole design guards against: a component like
 `CausalSelfAttention` cannot have a method like `has_ve(layer_idx, n_layer)` (a policy about
@@ -255,7 +327,7 @@ decision is already made. Materializing it is the depth-dial layer's job, not co
 
 ## Component contracts
 
-Three module contracts (`modelcore/components/contracts.py`), each owning everything about its
+Module contracts (`modelcore/components/contracts.py`), each owning everything about its
 own concern and nothing about how it's assembled into a model:
 
 ```python
@@ -265,8 +337,19 @@ class BaseEmbedding(nn.Module):
 
 class BaseBlock(nn.Module):
     def init_weights(self): ...
-    def forward(self, x, x0, idx, kv_cache, kv_bus=None): ...
-    def layer_spec(self): return None   # AttentionLayerSpec, or None if not attention-shaped
+    def forward(self, x, x0, idx, kv_cache, kv_bus=None, doc_args=None): ...
+    def layer_spec(self): return None   # AttentionLayerSpec, or None if it holds no KV cache
+
+class BaseMixer(nn.Module):             # the block's token-mixing slot (attention, ...)
+    def init_weights(self): ...
+    def bind_layer(self, layer_idx): ...
+    def forward(self, x, idx, cache, bus=None, doc_args=None): ...
+    def layer_spec(self): return None
+
+class BaseFeature(nn.Module):           # a trick in a host's `features` list
+    HOOKS = ()                          # hook-point names it implements, one method each
+    def bind(self, host): ...
+    def init_weights(self): ...
 
 class BaseUnembedding(nn.Module):
     def init_weights(self): ...
@@ -286,7 +369,7 @@ A component may know it must implement one of these contracts; it must not know 
 *who* wires it in. Position encoding is deliberately not baked into `BaseBlock.forward`'s
 signature (an architecture can swap RoPE for something else without touching the block/trunk
 contract); `x0` (the post-embedding residual) is computed by whichever composer needs it
-(`BackoutComposer`), not by the embedding.
+(`StackComposer`), not by the embedding.
 
 ### Every parameter needs a declared role
 
@@ -312,9 +395,8 @@ always did — nothing extra).
 self-registers at its own class definition:
 
 ```python
-@register_component("gpt_block", needs=("n_embd", "padded_vocab_size", "rope", "norm", "runtime"),
-                     validate=_validate_gpt_block)
-class Block(BaseBlock):
+@register_component("block", needs=("norm",), validate=_validate_block)
+class Block(BaseBlock, FeatureHost):
     ...
 ```
 
@@ -340,10 +422,12 @@ imports both, so the catalog is always fully populated by the time a caller reac
   present; every `#type` registered; every `needs` name available in the build context; no unknown
   or missing constructor params (checked via `inspect.signature`).
 - **Semantic checks (component-owned, via the catalog's `validate` hook)**: `n_embd` divisible by
-  `n_head`, a KV-sharing consumer (`produces_kv=False`) can't have `has_value_embed=True`,
+  `n_head`, a KV-sharing consumer (`produces_kv=False`) can't carry a `value_embed` feature,
   `produces_kv=False` requires an explicit `kv_slot` — things only the component knows the rule
-  for. `modelcore/components/block.py`'s `_validate_gpt_block`/`_validate_plain_block` are the
-  reference implementation.
+  for. `modelcore/components/attention.py`'s `_validate_attention` is the reference implementation.
+- **Feature checks (core-owned)**: a host's `features` holds only registered `BaseFeature`s whose
+  `HOOKS` the host's `HOOK_POINTS` cover, each `#type` at most once; a block's `mixer` must be a
+  `BaseMixer`.
 - **Cross-layer checks (core-owned, but generic over any composer's block list, not hardcoded to
   one composer type)**: KV slots form a contiguous `0..M-1` range, a consumer's `kv_slot` points
   at an earlier producer, `n_kv_head`/`head_dim` are uniform across every attention-shaped block —
@@ -504,7 +588,7 @@ fewer KV slots than layers).
 
 `doc_args` (a `modelcore.kernels.flash_attn.DocArgs`, built by `build_doc_args(idx, bos_token_id)`)
 restricts attention to within each packed training row's own document, threaded through
-`Model.forward` → the active composer → `BaseBlock.forward` → `CausalSelfAttention.forward`
+`Model.forward` → the active composer → `Block.forward` → the mixer (`CausalSelfAttention.forward`)
 alongside `kv_bus`, defaulting to `None` (today's behavior: attention sees the whole row) at every
 hop. Training only — always `None` when `kv_cache is not None`, since one KV-cache row is one
 document at decode time.
@@ -575,7 +659,7 @@ direction; adapters are the first instance of it outside architecture itself.
 ```python
 @dataclass
 class AdapterSpec:
-    target: str            # module FQN relative to the Model root, e.g. "body.blocks.3.attn.c_q"
+    target: str            # module FQN relative to the Model root, e.g. "body.blocks.3.mixer.c_q"
     name: str               # stable handle: keys its state_dict entries, and what a caller
                             # enables/disables/re-adds by
     type: str               # a modelcore.peft.registry name -- "lora" | "dora" today

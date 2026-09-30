@@ -18,15 +18,22 @@ See [docs/architecture.md](docs/architecture.md) for the full contract.
 import torch
 from modelcore import ComponentSpec, ModelConfig, ModelManager
 
+head_dim = 64
 config = ModelConfig(
-    sequence_len=1024, vocab_size=32768, n_embd=768,
-    shared={"rope": ComponentSpec("rotary", {"head_dim": 64})},
+    sequence_len=1024, vocab_size=32768, n_embd=768, pad_vocab_size_to=64, template="base",
+    shared={"rope": ComponentSpec("rotary", {"head_dim": head_dim, "over_compute": 10}),
+            "norm": ComponentSpec("rms_norm", {"eps": None})},
     input=ComponentSpec("token_embedding", {"smear": False}),
-    body=ComponentSpec("stack", {"blocks": [
-        ComponentSpec("plain_block", {"layer_idx": i, "n_head": 12, "n_kv_head": 12, "window": -1})
+    body=ComponentSpec("stack", {"features": [], "blocks": [
+        ComponentSpec("block", {
+            "layer_idx": i, "features": [],
+            "mixer": ComponentSpec("attention", {"n_head": 12, "n_kv_head": 12, "head_dim": head_dim, "window": -1,
+                                                 "kv_slot": None, "produces_kv": True, "features": []}),
+            "ffn": ComponentSpec("gated_mlp", {"activation": "silu", "hidden_dim": 2048}),
+        })
         for i in range(12)
     ]}),
-    output=ComponentSpec("lm_head", {}),
+    output=ComponentSpec("lm_head", {"softcap": 15}),
 )
 
 manager = ModelManager()
