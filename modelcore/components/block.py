@@ -27,10 +27,11 @@ class Block(BaseBlock, FeatureHost):
     handed to the mixer (see BaseMixer.bind_layer); the norm is the config's shared one
     (`shared.norm`).
 
-    Hook points: `residual_in`(x, x0) -> x, applied to the block input before anything else. x0 is
+    Hook points: `residual_in`(x, x0) -> x, applied to the block input before anything else (x0 is
     the stack's post-embedding activations, threaded to every block whether or not a feature reads
-    it."""
-    HOOK_POINTS = ("residual_in",)
+    it); `pre_mixer`(h, cache, doc_args) -> h and `pre_ffn`(h, cache, doc_args) -> h, on the normed
+    input of the mixer / of the ffn."""
+    HOOK_POINTS = ("residual_in", "pre_mixer", "pre_ffn")
 
     def __init__(self, layer_idx, mixer, ffn, features, norm):
         super().__init__()
@@ -52,6 +53,8 @@ class Block(BaseBlock, FeatureHost):
 
     def forward(self, x, x0, idx, kv_cache, kv_bus=None, doc_args=None):
         x = self._hook("residual_in", x, x0)
-        x = x + self.mixer(self.norm(x), idx, kv_cache, kv_bus, doc_args)
-        x = x + self.ffn(self.norm(x))
+        h = self._hook("pre_mixer", self.norm(x), kv_cache, doc_args)
+        x = x + self.mixer(h, idx, kv_cache, kv_bus, doc_args)
+        h = self._hook("pre_ffn", self.norm(x), kv_cache, doc_args)
+        x = x + self.ffn(h)
         return x

@@ -30,8 +30,8 @@ modelcore/
 ├── catalog.py           component registry: "#type" name -> (cls, needs, validate)
 ├── components/           linear, norm, rope, rotary, attention (the `attention` mixer, incl.
 │                         cross-layer KV sharing), mlp, block (the ONE block class), features
-│                         (output_gate, value_embed, resid_lambdas, backout), embedding (+smear),
-│                         unembedding
+│                         (output_gate, value_embed, resid_lambdas, canon, backout), conv (shared causal
+│                         depthwise conv + the `short_conv` mixer), embedding (+smear), unembedding
 ├── composers/             base, stack (the ONE body class)
 ├── convert.py              checkpoint converter v1/v2 -> v3 (`python -m modelcore.convert`)
 ├── roles.py               parameter-role protocol (optimizer grouping)
@@ -110,6 +110,19 @@ modelcore/
   converter (state keys) — keep them one function.
 - **In a model where not every layer is attention, `kv_slot` is stated explicitly.** `kv_slot: null`
   means "my `layer_idx`", which is only a contiguous slot number when every layer holds a KV cache.
+- **`layer_specs()` has one entry per block and is not all `AttentionLayerSpec`.** It is an
+  attention spec, a `RecurrentLayerSpec` (fixed-size state) or `None`; anything in `stats.py` that
+  reads attention fields must go through `_attention(layer_specs)`, which keeps the block index (a
+  default `kv_slot` is that index). A pure-recurrent model has `num_kv_slots=0`.
+- **Recurrent/conv state lives in `KVCache.state`, any rank, batch first.** Keys are per layer
+  (`short_conv.<i>`, `canon.<i>.<site>`); `prefill` expands and `prefill_row` copies whatever is
+  there, so a new stateful mixer needs no cache change. Its `layer_spec()` states `state_elems`, a
+  stateful *feature* states `state_elems()`/`fwd_flops_per_token()` -- otherwise `state_bytes_per_row`
+  and the FLOPs figures silently omit it, the same failure mode as a matmul outside `Linear`.
+- **Every layer kind honours `doc_args.doc_ids`.** A packed row must equal its documents run alone
+  (a state that leaks across a boundary is silent corruption). The tests in
+  `tests/test_recurrent.py` check it per mixer and per whole model, awake -- a fresh model
+  zero-inits its output projections, so a leak would not show.
 - **A block's `head_dim` and `shared.rope`'s own `head_dim` are stated independently and never
   cross-checked.** `head_dim=null` on a block derives `n_embd // n_head` (what every config did
   before this param existed — the v1→v2 upgrader writes `null`, never a computed number); an

@@ -55,6 +55,19 @@ class AttentionLayerSpec:
 
 
 @dataclass
+class RecurrentLayerSpec:
+    """Per-layer state of a mixer that carries a fixed-size summary of the past instead of a KV
+    cache (a convolution's last k-1 inputs, later an SSM's hidden state). state_elems is what the
+    inference cache holds per row for this layer -- constant however long the context, unlike
+    attention's KV bytes per token. fwd_flops_per_token is the forward cost per token beyond the
+    layer's Linear matmuls (which modelcore.stats already counts structurally): a conv's taps, a
+    scan. `kind` is a label for reports."""
+    kind: str
+    state_elems: int
+    fwd_flops_per_token: int = 0
+
+
+@dataclass
 class ComponentSpec:
     """`comments` holds this spec's `_`-prefixed keys. They are deliberately not in `params`:
     params become constructor kwargs (and are checked against the constructor's signature), so a

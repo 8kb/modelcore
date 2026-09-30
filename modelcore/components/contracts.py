@@ -36,6 +36,15 @@ class BaseFeature(nn.Module):
     def init_weights(self):
         pass
 
+    def state_elems(self):
+        """Elements of per-row inference state this feature keeps in the cache (0 for none)."""
+        return 0
+
+    def fwd_flops_per_token(self):
+        """Forward FLOPs per token beyond Linear matmuls (0 for none). Shapes only -- both stats
+        methods run on a meta-device model."""
+        return 0
+
 
 class FeatureHost:
     """Mixin for a component that carries features. HOOK_POINTS is what the host promises to call;
@@ -80,7 +89,7 @@ class BaseMixer(nn.Module):
         raise NotImplementedError
 
     def layer_spec(self):
-        """AttentionLayerSpec for this layer, or None if this mixer holds no KV cache."""
+        """AttentionLayerSpec (a KV cache), RecurrentLayerSpec (a fixed-size state), or None."""
         return None
 
 
@@ -95,7 +104,7 @@ class BaseBlock(nn.Module):
         raise NotImplementedError
 
     def layer_spec(self):
-        """AttentionLayerSpec for this layer, or None if it holds no KV cache."""
+        """AttentionLayerSpec, RecurrentLayerSpec, or None -- whatever its mixer reports."""
         return None
 
 

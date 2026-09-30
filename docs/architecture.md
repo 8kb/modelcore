@@ -26,8 +26,9 @@ modelcore/
 │   │                      upgrade_v2_to_v3, remap_v2_name (v2 module FQN / state key -> v3)
 │   └── validate.py        validate_config() -- structural + component-owned semantic checks
 ├── catalog.py           component registry: "#type" name -> (cls, needs, validate)
-├── components/           linear, norm, rope, rotary, attention (the `attention` mixer), mlp, block
-│                         (the one `block` class), features (output_gate, value_embed, resid_lambdas,
+├── components/           linear, norm, rope, rotary, attention (the `attention` mixer), conv (the
+│                         shared causal depthwise conv + the `short_conv` mixer), mlp, block (the one
+│                         `block` class), features (output_gate, value_embed, resid_lambdas, canon,
 │                         backout), embedding, unembedding
 ├── composers/             base, stack (the one body class)
 ├── convert.py             convert_checkpoint_v2_to_v3 + `python -m modelcore.convert`
@@ -245,6 +246,7 @@ features on one point chain in list order.
 | host | hook | signature | features today |
 |---|---|---|---|
 | `block` | `residual_in` | `(x, x0) -> x` | `resid_lambdas` |
+| `block` | `pre_mixer`, `pre_ffn` | `(h, cache, doc_args) -> h`, on the normed mixer / ffn input | `canon` |
 | `attention` | `values` | `(v, x, idx) -> v` | `value_embed` |
 | `attention` | `output` | `(y, x) -> y`, `y` is `(B, T, H, D)` | `output_gate` |
 | `stack` | `after_block`, `finish` | `(x, i, state) -> x`, `(x, state) -> x` | `backout` |
@@ -272,6 +274,41 @@ spec. The gate projection is a `Linear` (role `matrix`, counted in matmul FLOPs)
 the ResFormer-style value residual, `v += 3*sigmoid(gate(x[..., :gate_channels])) * embed(idx)`
 (`embed` is role `value_embedding`, `gate` a `Linear`); a KV-sharing consumer layer
 (`produces_kv=false`) has no V of its own and can't carry it.
+
+### Recurrent mixers and per-row state
+
+The mixer slot is polymorphic. `attention` holds a KV cache and reports an `AttentionLayerSpec`; a
+mixer with a fixed-size state instead reports a `RecurrentLayerSpec(kind, state_elems,
+fwd_flops_per_token)`; `Model.layer_specs()` has one entry per block (attention spec, recurrent
+spec, or `None`) and everything in `modelcore.stats` filters on the type. Consequences:
+
+- **Cache.** A recurrent mixer keeps its state in `KVCache.state` (the dict `smear` already uses),
+  keyed by layer (`short_conv.<layer_idx>`, `canon.<layer_idx>.<site>`), any rank as long as the
+  first dim is the batch: `prefill` expands it to every row, `prefill_row` copies it into one row.
+  A model with no attention at all has `num_kv_slots=0` (`kv_cache_spec` returns zeros; the k/v
+  tensors are empty). Ragged decode needs nothing extra: each prompt is prefilled alone at batch 1.
+- **Stats.** `ModelStats.state_elems_per_row`/`state_bytes_per_row()` is the constant per-row
+  state (recurrent mixers + stateful features), the counterpart of `kv_bytes_per_token()`, which
+  is 0 for a pure-conv model. `extra_fwd_flops_per_token` (conv taps, later scans) enters
+  `flops_per_token` at 3x (forward + backward), `decode_flops` at 1x whatever the context, and
+  `prefill_flops` per token; matmuls stay counted structurally through `Linear`.
+- **Intra-document masking.** `doc_args.doc_ids` (built by `build_doc_args`) is honoured by every
+  layer kind: a conv tap only reads a token of the same document, so a packed row equals running
+  each document alone. Tested per mixer and per model.
+- **KV slots in a hybrid.** `kv_slot: null` means `layer_idx`, which is not a contiguous slot number
+  once some layers aren't attention, so a hybrid config states every attention layer's `kv_slot`
+  explicitly (0..M-1 over the attention layers only).
+- **Optimizer.** Depthwise conv filters have role `conv` (AdamW, no weight decay,
+  `OptimizerHparams.conv_lr`), appended last in the policy table.
+
+`short_conv` is the gated short convolution (LFM2-style): `b, c, v = in_proj(x); y = b * v`, a
+causal depthwise conv over `y` (`kernel_size` taps, `(n_embd, kernel_size)` filter), then
+`out_proj(c * conv(y))`. It needs no positional encoding, no RoPE in `shared`, and no KV cache; its
+state is the last `kernel_size - 1` values of `b * v`. `canon` (Physics of Language Models 4.1) is a
+block feature, not a mixer: `h = h + causalconv(h)` on the normed mixer input and/or ffn input
+(`sites`), so it composes with any mixer. Both use `components/conv.py`'s one
+`causal_depthwise_conv(x, weight, state, doc_ids)`, so full-sequence, prefill and single-step
+decode are the same arithmetic.
 
 ### Migrating from v2
 
@@ -448,11 +485,13 @@ class ModelStats:
     params_by_role: dict          # generic role -> numel, for every architecture uniformly
     num_params: int
     num_matmul_params: int
-    layer_specs: list[AttentionLayerSpec]
+    layer_specs: list              # per block: AttentionLayerSpec | RecurrentLayerSpec | None
     kv_cache_spec: dict            # what modelcore.cache.KVCache needs to allocate
     shape_summary: dict            # n_layer/n_embd/n_head/n_kv_head/sequence_len/window_pattern
     flops_per_token: int
     has_sliding_window: bool
+    state_elems_per_row: int       # recurrent mixers' + stateful features' cache elements per row
+    extra_fwd_flops_per_token: int # non-matmul, non-attention forward FLOPs (conv taps, scans)
 
     @property
     def num_scaling_params(self) -> int: ...   # matrix + unembedding roles (cleanest scaling laws)
@@ -460,6 +499,7 @@ class ModelStats:
     def prefill_flops(self, num_tokens): ...
     def kv_bytes_per_token(self): ...
     def kv_read_bytes(self, context_len): ...
+    def state_bytes_per_row(self): ...
 ```
 
 `shape_summary` reports a concrete value for `n_head`/`n_kv_head`/`window_pattern` when every

@@ -80,6 +80,44 @@ def _plain_like(n_layer=4, n_head=2, n_kv_head=2, n_embd=64, head_dim=32, vocab_
     )
 
 
+def _conv_mixer(kernel_size=4):
+    return ComponentSpec("short_conv", {"kernel_size": kernel_size})
+
+
+def _canon(kernel_size=4, sites=("pre_mixer", "pre_ffn")):
+    return lambda: ComponentSpec("canon", {"kernel_size": kernel_size, "sites": list(sites)})
+
+
+def _mixed_like(kinds, n_head=2, n_embd=64, head_dim=32, vocab_size=128, sequence_len=32, window=-1,
+                canon=None, kernel_size=4):
+    """Blocks whose mixer is per-layer `"attn"` or `"conv"` -- attention layers get explicit,
+    contiguous kv_slots (in a hybrid, layer_idx is not a slot number). A model with no `"attn"`
+    at all needs no rope. The FFN is llama-style, no other features; `canon` (a feature factory)
+    goes on every block."""
+    hidden = 256 * ((int(2 * (4 * n_embd) / 3) + 255) // 256)
+    blocks, slot = [], 0
+    for i, kind in enumerate(kinds):
+        if kind == "attn":
+            mixer = _mixer(n_head, n_head, head_dim, window, kv_slot=slot)
+            slot += 1
+        else:
+            mixer = _conv_mixer(kernel_size)
+        blocks.append(ComponentSpec("block", {
+            "layer_idx": i, "mixer": mixer,
+            "ffn": ComponentSpec("gated_mlp", {"activation": "silu", "hidden_dim": hidden}),
+            "features": [] if canon is None else [canon()],
+        }))
+    shared = {"norm": RMS_NORM()}
+    if "attn" in kinds:
+        shared["rope"] = ComponentSpec("rotary", {"head_dim": head_dim, "over_compute": 10})
+    return ModelConfig(
+        sequence_len=sequence_len, vocab_size=vocab_size, n_embd=n_embd, pad_vocab_size_to=64, template="base",
+        shared=shared, input=ComponentSpec("token_embedding", {"smear": False}),
+        body=ComponentSpec("stack", {"blocks": blocks, "features": []}),
+        output=ComponentSpec("lm_head", {"softcap": 15}),
+    )
+
+
 def _gpt_lora():
     """_gpt_like() with the whole body frozen and a LoRA adapter on two attention projections in
     layer 0 -- runs apply_adapters/the freeze-then-apply ordering, the "adapter" optimizer role,
@@ -132,6 +170,10 @@ FLAVORS = {
     "gpt_gated_head": lambda: _gpt_like(attn_gate=_gate("head")),
     "llama_gated_element": lambda: _plain_like(attn_gate=_gate("element", in_channels=16)),
     "llama_kvshare_gated_block": lambda: _plain_like(kv_slots=[0, 1, 1, 1], attn_gate=_gate("block", 8)),
+    "conv_only": lambda: _mixed_like(["conv"] * 4),
+    "hybrid_attn_conv": lambda: _mixed_like(["attn", "conv", "attn", "conv"]),
+    "hybrid_win_canon": lambda: _mixed_like(["conv", "attn", "conv", "attn"], window=8, canon=_canon()),
+    "llama_canon_mixer_only": lambda: _mixed_like(["attn"] * 3, canon=_canon(3, ("pre_mixer",))),
 }
 
 

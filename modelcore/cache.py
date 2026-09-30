@@ -29,8 +29,10 @@ class KVCache:
         # own methods may mutate cache_seqlens, or this goes stale.
         self._pos_uniform = 0
         # Extra per-model state that isn't shaped like a k/v tensor (e.g. GPT's "smear" reads/
-        # writes state["prev_embedding"]). Generic so architectures can stash whatever they need
-        # without KVCache knowing about any one architecture.
+        # writes state["prev_embedding"], a short_conv mixer its last k-1 inputs). Generic so
+        # architectures can stash whatever they need without KVCache knowing about any one
+        # architecture; every tensor is (batch, ...) of any rank. A model with no attention layers
+        # at all has num_kv_slots=0 and empty k/v tensors.
         self.state = {}
 
     def reset(self):
@@ -85,7 +87,7 @@ class KVCache:
         self._pos_uniform = other_pos
         # Expand any batch=1 extra state (e.g. GPT's smear prev_embedding) to num_samples rows
         for key, value in other.state.items():
-            self.state[key] = value.expand(self.batch_size, -1, -1).clone()
+            self.state[key] = value.expand(self.batch_size, *([-1] * (value.dim() - 1))).clone()
 
     def prefill_row(self, row, other):
         """Copy a batch=1 prefilled cache into row `row`, leaving every other row alone -- the

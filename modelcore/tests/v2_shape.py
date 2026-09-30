@@ -6,16 +6,25 @@ flavors use (a gpt block never shares KV, features are the known ones), and asse
 """
 import copy
 
+import pytest
+
 TYPE = "#type"
+
+
+def _v2_can_express(cond):
+    """v2 predates later mixers/features: a flavor using them has no v2 spelling, so a test that
+    downgrades it is skipped (it has nothing to say about v2)."""
+    if not cond:
+        pytest.skip("flavor uses components newer than v2")
 
 
 def _block_v3_to_v2(b):
     mixer = b["mixer"]
-    assert mixer[TYPE] == "attention"
+    _v2_can_express(mixer[TYPE] == "attention")
     block_feats = {f[TYPE]: f for f in b["features"]}
     mixer_feats = {f[TYPE]: f for f in mixer["features"]}
     is_gpt = "resid_lambdas" in block_feats
-    assert set(block_feats) <= {"resid_lambdas"} and set(mixer_feats) <= {"value_embed", "output_gate"}
+    _v2_can_express(set(block_feats) <= {"resid_lambdas"} and set(mixer_feats) <= {"value_embed", "output_gate"})
     out = {TYPE: ("gated_" if "output_gate" in mixer_feats else "") + ("gpt_block" if is_gpt else "plain_block"),
            **{k: v for k, v in b.items() if k.startswith("_")},
            "layer_idx": b["layer_idx"], **{k: mixer[k] for k in ("n_head", "n_kv_head", "head_dim", "window")}}

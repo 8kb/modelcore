@@ -4,6 +4,7 @@ Features: the registered tricks a host carries in its `features` list. A new tri
 See modelcore.components.contracts.BaseFeature for the protocol. Hook points and their shapes:
 
   block  `residual_in`(x, x0) -> x          before the mixer: reshape the residual stream
+  block  `pre_mixer`(h, cache, doc_args) -> h   the normed mixer input; `pre_ffn` likewise for the ffn
   attention `values`(v, x, idx) -> v         after V is projected, before RoPE/norm
   attention `output`(y, x) -> y              per-head attention output (B, T, H, D), before c_proj
   stack  `after_block`(x, i, state) -> x     after block i; `state` is this forward pass's dict
@@ -14,6 +15,7 @@ import torch.nn as nn
 
 from modelcore.catalog import register_component
 from modelcore.components.contracts import BaseFeature
+from modelcore.components.conv import causal_depthwise_conv
 from modelcore.components.linear import Linear
 
 
@@ -166,6 +168,74 @@ class ResidLambdas(BaseFeature):
 
     def residual_in(self, x, x0):
         return self.resid_lambda * x + self.x0_lambda * x0
+
+
+# -- canon ---------------------------------------------------------------------------------------
+
+CANON_SITES = ("pre_mixer", "pre_ffn")
+
+
+def _validate_canon(params, ctx):
+    errors = []
+    k = params.get("kernel_size")
+    if not _is_int(k) or k < 1:
+        errors.append(f"kernel_size must be a positive integer, got {k!r}")
+    sites = params.get("sites")
+    if not isinstance(sites, list) or not sites or len(set(sites)) != len(sites) or not set(sites) <= set(CANON_SITES):
+        errors.append(f"sites must be a non-empty list of distinct entries of {list(CANON_SITES)}, got {sites!r}")
+    return errors
+
+
+@register_component("canon", needs=("n_embd",), validate=_validate_canon)
+class Canon(BaseFeature):
+    """Canon layers (Physics of Language Models, part 4.1): h = h + causalconv(h), a depthwise
+    causal convolution with a residual, on the normed input of the mixer (Canon-A, `pre_mixer`)
+    and/or of the ffn (Canon-C, `pre_ffn`). It gives every layer a cheap, position-aware look at
+    the last kernel_size-1 tokens without touching the mixer, so it composes with attention,
+    SSMs and short_conv alike. `sites` picks which points carry a filter; each has its own
+    (n_embd, kernel_size) weight, initialised like torch's Conv1d default. Inference state per site
+    is the last kernel_size-1 inputs, kept in the cache; intra-document masking is honoured."""
+    HOOKS = CANON_SITES
+    PARAM_ROLES = {"weights": "conv"}
+
+    def __init__(self, n_embd, kernel_size, sites):
+        super().__init__()
+        self.n_embd = n_embd
+        self.kernel_size = kernel_size
+        self.sites = list(sites)
+        self.weights = nn.ParameterDict({s: nn.Parameter(torch.empty(n_embd, kernel_size)) for s in self.sites})
+
+    def bind(self, host):
+        self.layer_idx = host.layer_idx
+
+    @torch.no_grad()
+    def init_weights(self):
+        bound = self.kernel_size**-0.5
+        for w in self.weights.values():
+            torch.nn.init.uniform_(w, -bound, bound)
+
+    def state_elems(self):
+        return len(self.sites) * (self.kernel_size - 1) * self.n_embd
+
+    def fwd_flops_per_token(self):
+        return len(self.sites) * (2 * self.kernel_size + 1) * self.n_embd
+
+    def _site(self, site, h, cache, doc_args):
+        if site not in self.weights:
+            return h
+        key = f"canon.{self.layer_idx}.{site}"
+        state = None if cache is None else cache.state.get(key)
+        doc_ids = doc_args.doc_ids if (doc_args is not None and cache is None) else None
+        y, new_state = causal_depthwise_conv(h, self.weights[site], state, doc_ids)
+        if cache is not None:
+            cache.state[key] = new_state
+        return h + y
+
+    def pre_mixer(self, h, cache, doc_args):
+        return self._site("pre_mixer", h, cache, doc_args)
+
+    def pre_ffn(self, h, cache, doc_args):
+        return self._site("pre_ffn", h, cache, doc_args)
 
 
 # -- backout -------------------------------------------------------------------------------------

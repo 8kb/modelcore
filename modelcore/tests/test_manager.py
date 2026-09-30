@@ -108,15 +108,17 @@ def test_optimizer_groups_partition_parameters_exactly(manager, config):
 
 
 def test_layer_specs_and_kv_cache_spec_are_consistent(manager, config):
+    from modelcore import AttentionLayerSpec
     stats = manager.stats(config)
-    assert len(stats.layer_specs) == config.n_layer
-    n_kv_heads = {s.n_kv_head for s in stats.layer_specs}
-    head_dims = {s.head_dim for s in stats.layer_specs}
-    assert len(n_kv_heads) == 1 and len(head_dims) == 1
-    slots = {i if s.kv_slot is None else s.kv_slot for i, s in enumerate(stats.layer_specs)}
+    assert len(stats.layer_specs) == config.n_layer  # one entry per block: attention, recurrent or None
+    attn = [(i, s) for i, s in enumerate(stats.layer_specs) if isinstance(s, AttentionLayerSpec)]
+    n_kv_heads = {s.n_kv_head for _, s in attn}
+    head_dims = {s.head_dim for _, s in attn}
+    assert len(n_kv_heads) <= 1 and len(head_dims) <= 1
+    slots = {i if s.kv_slot is None else s.kv_slot for i, s in attn}
     assert slots == set(range(len(slots)))
     assert stats.kv_cache_spec["num_kv_slots"] == len(slots)
-    assert stats.kv_cache_spec["num_kv_slots"] <= len(stats.layer_specs)
+    assert stats.kv_cache_spec["num_kv_slots"] <= len(attn)
 
 
 def test_explicit_head_dim_decouples_attention_width_from_n_embd(manager):

@@ -18,7 +18,7 @@ import modelcore.composers  # noqa: F401 -- import for @register_component side 
 
 from modelcore.cache import KVCache
 from modelcore.config.spec import (
-    AdapterSpec, AttentionLayerSpec, ComponentSpec, ModelConfig, resolve_reference_config,
+    AdapterSpec, AttentionLayerSpec, ComponentSpec, ModelConfig, RecurrentLayerSpec, resolve_reference_config,
 )
 from modelcore.errors import ConfigError, ValidationReport
 from modelcore.generate import (
@@ -37,7 +37,7 @@ from modelcore.store import ArtifactStore, FileSystemStore, last_step
 
 __all__ = [
     "ModelManager", "OptimizerHparams", "Fp8Report",
-    "ModelConfig", "ComponentSpec", "AttentionLayerSpec", "AdapterSpec", "resolve_reference_config",
+    "ModelConfig", "ComponentSpec", "AttentionLayerSpec", "RecurrentLayerSpec", "AdapterSpec", "resolve_reference_config",
     "Model", "ModelStats", "KVCache",
     "Decoder", "generate_naive", "sample_next_token",
     "ToolSpec", "generate_with_tools", "collect_batch", "collect_batch_multi",

@@ -23,8 +23,10 @@ from modelcore.optim import MuonAdamW
 from modelcore.roles import build_param_groups, collect_param_roles
 from modelcore.runtime import DEFAULT_RUNTIME, Runtime
 from modelcore.stats import (
-    ModelStats, estimate_flops, has_sliding_window as _has_sliding_window, kv_cache_spec as _kv_cache_spec,
-    num_matmul_params as _num_matmul_params, shape_summary as _shape_summary,
+    ModelStats, estimate_flops, feature_costs as _feature_costs, has_sliding_window as _has_sliding_window,
+    kv_cache_spec as _kv_cache_spec, num_matmul_params as _num_matmul_params,
+    recurrent_fwd_flops as _recurrent_fwd_flops, recurrent_state_elems as _recurrent_state_elems,
+    shape_summary as _shape_summary,
 )
 
 
@@ -79,6 +81,7 @@ class OptimizerHparams:
     weight_decay: float = 0.0
     adapter_lr: float = 0.002        # LoRA/DoRA A/B factors -- a starting guess, not yet swept
     adapter_scalar_lr: float = 0.02  # DoRA's per-channel magnitude -- likewise unswept
+    conv_lr: float = 0.02            # depthwise conv filters (short_conv, canon) -- likewise unswept
 
 
 class ModelManager:
@@ -145,6 +148,9 @@ class ModelManager:
             # Newton-Schulz/Polar-Express orthogonalization step.
             "adapter": dict(kind='adamw', lr=hparams.adapter_lr * dmodel_lr_scale, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.0),
             "adapter_scalar": dict(kind='adamw', lr=hparams.adapter_scalar_lr * dmodel_lr_scale, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.0),
+            # Depthwise conv filters: (n_embd, kernel_size) is no shape for Muon, and a filter this
+            # small is not worth decaying.
+            "conv": dict(kind='adamw', lr=hparams.conv_lr * dmodel_lr_scale, betas=(0.9, 0.95), eps=1e-10, weight_decay=0.0),
         }
         param_groups = build_param_groups(collect_param_roles(model), policy)
         optimizer = MuonAdamW(param_groups)
@@ -260,6 +266,8 @@ class ModelManager:
         with torch.device("meta"):
             model = Model(config, runtime=self.runtime)
         layer_specs = model.layer_specs()
+        feature_state_elems, feature_flops = _feature_costs(model)
+        extra_fwd_flops = feature_flops + _recurrent_fwd_flops(layer_specs)
         matmul_params = _num_matmul_params(model) - _disabled_adapter_matmul_params(model)
         params_by_role = {
             role: sum(p.numel() for p in params)
@@ -273,9 +281,11 @@ class ModelManager:
             layer_specs=layer_specs,
             kv_cache_spec=_kv_cache_spec(layer_specs),
             shape_summary=_shape_summary(config, layer_specs),
-            flops_per_token=estimate_flops(layer_specs, matmul_params, config.sequence_len),
+            flops_per_token=estimate_flops(layer_specs, matmul_params, config.sequence_len, extra_fwd_flops),
             has_sliding_window=_has_sliding_window(layer_specs, config.sequence_len),
             _kv_dtype_itemsize=self.runtime.compute_dtype.itemsize,
+            state_elems_per_row=_recurrent_state_elems(layer_specs, feature_state_elems),
+            extra_fwd_flops_per_token=extra_fwd_flops,
         )
 
     def new_kv_cache(self, model: Model, *, batch_size: int, seq_len: int, device=None) -> KVCache:
