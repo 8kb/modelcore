@@ -115,6 +115,26 @@ def test_without_doc_ids_state_leaks_across_documents():
     assert not torch.allclose(y[:, 5:], y_doc[:, 5:], atol=1e-3)
 
 
+def test_scan_decay_equals_the_dt_A_form_when_the_decay_is_dt_times_A():
+    x, dt, A, Bm, Cm, D = _inputs(G=4)
+    y, h = ssd_scan_reference(x, dt, A, Bm, Cm, None, 4)
+    y2, h2 = ssm.ssd_scan_decay(x * dt.unsqueeze(-1), dt * A, Bm, Cm, 4)
+    assert torch.allclose(y, y2, atol=1e-5) and torch.allclose(h, h2, atol=1e-5)
+
+
+def test_scan_decay_takes_a_token_dependent_decay_and_an_unrelated_input_weight():
+    x, dt, A, Bm, Cm, D = _inputs(G=4)
+    a = -torch.rand(dt.shape) * 0.7
+    w = torch.rand(dt.shape)
+    y, h = ssm.ssd_scan_decay(x * w.unsqueeze(-1), a, Bm, Cm, 4)
+    # the same thing as a sequential recurrence
+    state = torch.zeros(2, 4, 6, 5)
+    for t in range(x.size(1)):
+        state = state * torch.exp(a[:, t]).view(2, 4, 1, 1) + (w[:, t, :, None] * x[:, t])[..., None] * Bm[:, t, :, None, :]
+        assert torch.allclose(y[:, t], torch.einsum("bhpn,bhn->bhp", state, Cm[:, t]), atol=1e-4, rtol=1e-4)
+    assert torch.allclose(h, state, atol=1e-4, rtol=1e-4)
+
+
 def test_ssd_scan_falls_back_to_the_reference_off_cuda():
     args = _inputs()
     assert torch.equal(ssd_scan(*args, 4)[0], ssd_scan_reference(*args, 4)[0])
@@ -136,6 +156,16 @@ class TestKernelVsReference:
         ref, href = ssd_scan_reference(*self._cuda(args, torch.bfloat16), 8, doc_ids=ids)
         assert torch.allclose(got.float(), ref.float(), atol=5e-2, rtol=5e-2)
         assert torch.allclose(hgot, href, atol=5e-2, rtol=5e-2)
+
+    def test_scan_decay(self):
+        """The token-dependent-decay form Mamba-3 uses, through the same kernel."""
+        x, _, _, Bm, Cm, _ = self._cuda(_inputs(T=13, H=8, P=16, N=16, G=8), torch.bfloat16)
+        a = -torch.rand(2, 13, 8, device="cuda") * 0.5 - 0.01
+        X = x * torch.rand(2, 13, 8, 1, device="cuda").to(torch.bfloat16)
+        ids = _doc_ids((5, 8)).cuda()
+        got, hgot = ssm.ssd_scan_decay(X, a, Bm, Cm, 8, doc_ids=ids)
+        ref, href = ssm._ssd_core(X, a, Bm, Cm, 8, doc_ids=ids)
+        assert torch.allclose(got.float(), ref, atol=5e-2, rtol=5e-2) and torch.allclose(hgot, href, atol=5e-2, rtol=5e-2)
 
     def test_step(self):
         x, dt, A, Bm, Cm, D = self._cuda(_inputs(T=1, H=8, P=16, N=16, G=2), torch.bfloat16)

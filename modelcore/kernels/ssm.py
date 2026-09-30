@@ -64,24 +64,24 @@ def _segsum(a):
     return seg.masked_fill(~torch.tril(torch.ones(T, T, dtype=torch.bool, device=a.device)), -torch.inf)
 
 
-def ssd_scan_reference(x, dt, A, B, C, D, chunk_size, initial_state=None, doc_ids=None):
-    out_dtype = x.dtype
-    Bsz, T, H, P = x.shape
+def _ssd_core(X, a, B, C, chunk_size, initial_state=None, doc_ids=None):
+    """The chunked scan on already-scaled inputs: h_t = exp(a_t) h_{t-1} + X_t (x) B_t, y_t = h_t . C_t
+    (no D skip). X (B, T, H, P) is the input including its step-size factor, a (B, T, H) the log
+    decay (<= 0), B/C (B, T, G, N). Returns (y float32, final_state float32)."""
+    Bsz, T, H, P = X.shape
     G, N = B.size(2), B.size(3)
-    x, dt, A, B, C = (t.float() for t in (x, dt, A, B, C))
-    x_skip = x
+    X, a, B, C = (t.float() for t in (X, a, B, C))
     Q = chunk_size
     pad = (-T) % Q
-    if pad:  # dt = 0 and x = 0: decay 1, no input -- the tail is neutral for outputs and state
-        x, dt, B, C = (torch.nn.functional.pad(t, (0, 0) * (t.dim() - 2) + (0, pad)) for t in (x, dt, B, C))
+    if pad:  # a = 0 and X = 0: decay 1, no input -- the tail is neutral for outputs and state
+        X, a, B, C = (torch.nn.functional.pad(t, (0, 0) * (t.dim() - 2) + (0, pad)) for t in (X, a, B, C))
         if doc_ids is not None:  # the neutral tail stays in the last document
             doc_ids = torch.cat([doc_ids, doc_ids[:, -1:].expand(Bsz, pad)], dim=1)
-    c = x.size(1) // Q
+    c = X.size(1) // Q
     B = B.repeat_interleave(H // G, dim=2)
     C = C.repeat_interleave(H // G, dim=2)
 
-    a = dt * A                                            # (B, T, H), <= 0
-    X = (x * dt.unsqueeze(-1)).view(Bsz, c, Q, H, P)
+    X = X.view(Bsz, c, Q, H, P)
     Bc, Cc = B.view(Bsz, c, Q, H, N), C.view(Bsz, c, Q, H, N)
     a = a.view(Bsz, c, Q, H).permute(0, 3, 1, 2)          # (B, H, c, Q)
     a_cs = torch.cumsum(a, dim=-1)
@@ -121,10 +121,34 @@ def ssd_scan_reference(x, dt, A, B, C, D, chunk_size, initial_state=None, doc_id
         state_decay = state_decay * (ids == prev_last.unsqueeze(-1)).unsqueeze(1)
     Y_off = torch.einsum("bclhn,bchpn,bhcl->bclhp", Cc, states_in, state_decay)
 
-    y = (Y_diag + Y_off).reshape(Bsz, c * Q, H, P)[:, :T]
+    return (Y_diag + Y_off).reshape(Bsz, c * Q, H, P)[:, :T], final_state
+
+
+def ssd_scan_reference(x, dt, A, B, C, D, chunk_size, initial_state=None, doc_ids=None):
+    y, final_state = _ssd_core(x.float() * dt.float().unsqueeze(-1), dt.float() * A.float(), B, C,
+                               chunk_size, initial_state, doc_ids)
     if D is not None:
-        y = y + D.float().view(1, 1, H, 1) * x_skip
-    return y.to(out_dtype), final_state
+        y = y + D.float().view(1, 1, -1, 1) * x.float()
+    return y.to(x.dtype), final_state
+
+
+def ssd_scan_decay(X, a, B, C, chunk_size, initial_state=None, doc_ids=None):
+    """The same scan with the decay given directly instead of as dt * A: h_t = exp(a_t) h_{t-1} +
+    X_t (x) B_t, y_t = h_t . C_t, for a token-dependent log decay a (B, T, H), a < 0, and inputs X
+    (B, T, H, P) that already carry their own scale. What Mamba-3 needs (a data-dependent A and an
+    input weight that is not the step size). No D skip. Returns (y, final_state float32).
+
+    Kernel path: mamba_chunk_scan_combined takes a per-head scalar A, so A = -1 and dt = -a make
+    the decay exp(a), and x is divided by dt to undo the kernel's own x * dt."""
+    if _use_kernel(X):
+        dt = (-a).float()
+        y, final = _kernel.mamba_chunk_scan_combined(
+            (X.float() / dt.unsqueeze(-1)).to(X.dtype), dt, -torch.ones(X.size(2), device=X.device), B, C, chunk_size,
+            initial_states=None if initial_state is None else initial_state.to(X.dtype),
+            seq_idx=None if doc_ids is None else doc_ids.to(torch.int32), dt_softplus=False, return_final_states=True)
+        return y, final.float()
+    y, final = _ssd_core(X, a, B, C, chunk_size, initial_state, doc_ids)
+    return y.to(X.dtype), final
 
 
 def ssd_scan(x, dt, A, B, C, D, chunk_size, initial_state=None, doc_ids=None):

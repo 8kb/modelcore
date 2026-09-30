@@ -27,7 +27,7 @@ modelcore/
 │   └── validate.py        validate_config() -- structural + component-owned semantic checks
 ├── catalog.py           component registry: "#type" name -> (cls, needs, validate)
 ├── components/           linear, norm, rope, rotary, attention (the `attention` mixer), conv (the
-│                         shared causal depthwise conv + the `short_conv` mixer), mamba2, mlp, block (the one
+│                         shared causal depthwise conv + the `short_conv` mixer), mamba2, mamba3, mlp, block (the one
 │                         `block` class), features (output_gate, value_embed, resid_lambdas, canon,
 │                         backout), embedding, unembedding
 ├── composers/             base, stack (the one body class)
@@ -335,6 +335,43 @@ decay matrix, on which tokens reach a chunk's state, and on the carry between ch
 the sequence, boundaries inside a chunk, at its edge, several per chunk); the kernel path against the
 reference only on a GPU (`tests/test_ssm.py::TestKernelVsReference`), so treat it as unverified until
 that has run.
+
+### Mamba-3 (SISO)
+
+`mamba3` (`components/mamba3.py`) follows the reference (`state-spaces/mamba`'s `modules/mamba3.py`
+and `ops/triton/mamba3/mamba3_siso_step.py`). Against Mamba-2:
+
+- **Exponential-trapezoidal discretization.** `h_t = a_t h_{t-1} + b_t k_{t-1} x_{t-1} + g_t k_t x_t`
+  with `a = exp(A_t dt_t)`, `g = lam dt`, `b = (1 - lam) dt a`, `lam = sigmoid(...)` per head and
+  token, and a **data-dependent** `A_t = -max(heavy_tail(dd_A), A_floor)`. The state sees the
+  previous token too, an implicit width-2 convolution: **there is no short conv** in the layer.
+- **Complex state as a data-dependent rotation of B and C.** Both are rotated by the same
+  cumulative angle `sum_i tanh(w_i) pi dt_i` (per head, per pair; `w` is a projection shared by
+  the heads, `dt` is per head), so only the relative rotation between tokens survives in
+  `C_t . B_s`. **Mamba-3 needs no positional RoPE** (`shared.rope`): the recurrence orders tokens,
+  and the angles come from the input, not the position. The rotation reuses
+  `components/rope.py`'s `apply_rotary_emb` on the first `2 * num_rope_angles` dims (`rope_fraction`
+  0.5 or 1.0; the reference pairs neighbours where this repo's RoPE pairs halves -- the same
+  rotation up to a fixed permutation of dims). Attention layers in a hybrid keep `shared.rope`;
+  making them NoPE would be a later feature.
+- **BC norm and B/C biases.** The shared parameterless norm on B and C (the reference's carries a
+  learnable gain), then a learnable per-head bias on each, initialised to 1.
+- No `A_log`, no conv. Params/roles: `in_proj`/`out_proj` matrix; `dt_bias`, `B_bias`, `C_bias`, `D`
+  role `ssm`. The reference's optional output-projection norm is not implemented. `mimo_rank` is
+  in the spec from day one (`B_bias`/`C_bias` are `(n_head, mimo_rank, d_state)`); the validator
+  rejects `mimo_rank > 1` until MIMO is implemented.
+
+**Scan.** No new kernel: with `c_t = dt_t (1 - lam_t)` and `s_t = h_t + c_{t+1} k_t x_t`, the state
+`s` obeys a plain scan `s_t = a_t s_{t-1} + (g_t + c_{t+1}) k_t x_t`, and
+`y_t = q_t . s_t - c_{t+1} (q_t . k_t) x_t`. `c_{t+1}` is 0 at the last token of a call and of a
+document, so the scan's final state is the true `h` and a packed row equals its documents. The scan
+is `kernels.ssm.ssd_scan_decay` (decay and input weight given directly); on CUDA it goes through
+`mamba_chunk_scan_combined` with `A = -1`, `dt = -a`, `x / dt`. The reference repo also ships
+dedicated Mamba-3 Triton/CuTe kernels; those are not used here (not in the hub build, and
+unverifiable without a GPU). Streaming keeps `h`, the previous token's rotated `k` and `x`, and
+the running angle in the cache and continues from `s_{-1} = h + c_0 k_{-1} x_{-1}`; one-token decode
+is the direct recurrence, and tests check it against the scan and against the paper's recurrence
+written out token by token with explicit 2x2 rotation blocks.
 
 ### Migrating from v2
 

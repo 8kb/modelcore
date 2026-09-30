@@ -19,7 +19,8 @@ from modelcore.roles import collect_param_roles
 from modelcore.tests.conftest import FLAVORS, _canon, _mixed_like, _plain_like, build
 
 CONV_FLAVORS = ["conv_only", "hybrid_attn_conv", "hybrid_win_canon", "llama_canon_mixer_only",
-                "mamba2_only", "mamba2_groups", "hybrid_mamba2_attn"]
+                "mamba2_only", "mamba2_groups", "hybrid_mamba2_attn",
+                "mamba3_only", "mamba3_groups_full_rope", "hybrid_mamba3_attn"]
 BOS = 1
 
 
@@ -177,8 +178,10 @@ def test_awake_model_actually_uses_its_conv_layers(manager, flavor):
     b[0, 6] = (b[0, 6] + 1) % 100
     with torch.no_grad():
         la, lb = model(a), model(b)
-    assert torch.equal(la[:, :6], lb[:, :6])
-    assert not torch.allclose(la[:, 6:], lb[:, 6:])
+    # Mamba-3 folds the next token's step into the scan and subtracts it again, so the past is
+    # unchanged only up to float rounding
+    assert torch.allclose(la[:, :6], lb[:, :6], atol=1e-5, rtol=1e-5)
+    assert not torch.allclose(la[:, 6:], lb[:, 6:], atol=1e-4)
 
 
 def _packed_batch(vocab, lens, seed=5):

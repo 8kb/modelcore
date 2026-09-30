@@ -31,7 +31,7 @@ modelcore/
 ├── components/           linear, norm, rope, rotary, attention (the `attention` mixer, incl.
 │                         cross-layer KV sharing), mlp, block (the ONE block class), features
 │                         (output_gate, value_embed, resid_lambdas, canon, backout), conv (shared causal
-│                         depthwise conv + the `short_conv` mixer), mamba2, embedding (+smear), unembedding
+│                         depthwise conv + the `short_conv` mixer), mamba2, mamba3, embedding (+smear), unembedding
 ├── composers/             base, stack (the ONE body class)
 ├── convert.py              checkpoint converter v1/v2 -> v3 (`python -m modelcore.convert`)
 ├── roles.py               parameter-role protocol (optimizer grouping)
@@ -124,6 +124,12 @@ modelcore/
   what runs off CUDA; `mamba_chunk_scan_combined`/`selective_state_update` (hub:
   `kernels-community/mamba-ssm`) are only compared to it in `TestKernelVsReference`, which skips
   here. Reset state with masks, never a `-inf` decay (cumsum cancellation).
+- **Mamba-3 needs no positional RoPE, and its rotation is not `shared.rope`.** Its complex state
+  is a data-dependent rotation of B and C by a cumulative angle the mixer computes itself; only
+  relative angles matter, so it is not reset at a document boundary. It reuses `apply_rotary_emb`,
+  not the rope table. Its scan trick (`s_t = h_t + c_{t+1} k_t x_t`) is only exact if `c_{t+1}` is
+  zeroed at the end of a call and of a document -- see the module docstring; it is why a Mamba-3
+  layer is causal only up to float rounding. `mimo_rank > 1` is rejected until MIMO exists.
 - **Every layer kind honours `doc_args.doc_ids`.** A packed row must equal its documents run alone
   (a state that leaks across a boundary is silent corruption). The tests in
   `tests/test_recurrent.py` check it per mixer and per whole model, awake -- a fresh model
