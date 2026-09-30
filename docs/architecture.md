@@ -27,7 +27,7 @@ modelcore/
 │   └── validate.py        validate_config() -- structural + component-owned semantic checks
 ├── catalog.py           component registry: "#type" name -> (cls, needs, validate)
 ├── components/           linear, norm, rope, rotary, attention (the `attention` mixer), conv (the
-│                         shared causal depthwise conv + the `short_conv` mixer), mlp, block (the one
+│                         shared causal depthwise conv + the `short_conv` mixer), mamba2, mlp, block (the one
 │                         `block` class), features (output_gate, value_embed, resid_lambdas, canon,
 │                         backout), embedding, unembedding
 ├── composers/             base, stack (the one body class)
@@ -42,7 +42,7 @@ modelcore/
 ├── precision/
 │   └── fp8.py              Float8Linear + convert_to_float8_training (ModelManager.enable_fp8)
 ├── optim/                  MuonAdamW, schedules.py (lr_multiplier/muon_momentum)
-├── kernels/                FA3/SDPA flash-attention interface
+├── kernels/                FA3/SDPA flash-attention interface; ssm.py (SSD scan, mamba_ssm kernels)
 ├── cache.py                KVCache
 └── tests/                  modelcore's own test suite (see "Verifying" below)
 ```
@@ -309,6 +309,32 @@ block feature, not a mixer: `h = h + causalconv(h)` on the normed mixer input an
 (`sites`), so it composes with any mixer. Both use `components/conv.py`'s one
 `causal_depthwise_conv(x, weight, state, doc_ids)`, so full-sequence, prefill and single-step
 decode are the same arithmetic.
+
+### Mamba-2
+
+`mamba2` is the Mamba-2 mixer (`components/mamba2.py`): `in_proj` → `[z, x, B, C, dt]`, a depthwise
+causal conv (with bias) over `[x, B, C]` then SiLU, `dt = softplus(dt + dt_bias)`, `A = -exp(A_log)`,
+the SSD scan, `norm(y * silu(z))`, `out_proj`. Every param is required and concrete: `d_state`,
+`head_dim`, `expand` (`d_inner = expand * n_embd`, `n_head = d_inner / head_dim`), `n_groups` (B/C
+shared across the heads of a group), `kernel_size`, `chunk_size`, and the reference's init dials
+`dt_min`/`dt_max`/`dt_init_floor`/`A_init_min`/`A_init_max`. Deviations from the reference: the gated
+norm is the shared parameterless one (no learnable gain, per the norms rule), and `out_proj` is zero
+initialised. Roles: `in_proj`/`out_proj` matrix (Muon), conv filter and bias `conv`, and the per-head
+`A_log`/`dt_bias`/`D` role `ssm` (AdamW, no weight decay, `OptimizerHparams.ssm_lr`). It needs no
+positional encoding (a pure-Mamba config carries no `rope`), no KV cache, and keeps per row the conv's
+last `kernel_size-1` inputs plus an `(n_head, head_dim, d_state)` state in `KVCache.state`.
+
+The scan is `modelcore/kernels/ssm.py`: `ssd_scan` (chunked, any length, initial state in / final
+state out) and `ssd_step` (one decode token). The reference is pure PyTorch and is what runs off
+CUDA; on CUDA it loads `kernels-community/mamba-ssm` (`mamba_chunk_scan_combined`,
+`selective_state_update`) through the `kernels` hub, like flash_attn.py loads FA3, and falls back
+with the reason recorded. Document resets are exact in the reference (masks on the within-chunk
+decay matrix, on which tokens reach a chunk's state, and on the carry between chunks -- not a
+`-inf` decay, whose cumulative sums cancel catastrophically) and are passed to the kernel as
+`seq_idx`. The reference is checked against a sequential recurrence (chunk sizes from 1 to beyond
+the sequence, boundaries inside a chunk, at its edge, several per chunk); the kernel path against the
+reference only on a GPU (`tests/test_ssm.py::TestKernelVsReference`), so treat it as unverified until
+that has run.
 
 ### Migrating from v2
 

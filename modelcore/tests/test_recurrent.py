@@ -18,7 +18,8 @@ from modelcore.kernels.flash_attn import build_doc_args
 from modelcore.roles import collect_param_roles
 from modelcore.tests.conftest import FLAVORS, _canon, _mixed_like, _plain_like, build
 
-CONV_FLAVORS = ["conv_only", "hybrid_attn_conv", "hybrid_win_canon", "llama_canon_mixer_only"]
+CONV_FLAVORS = ["conv_only", "hybrid_attn_conv", "hybrid_win_canon", "llama_canon_mixer_only",
+                "mamba2_only", "mamba2_groups", "hybrid_mamba2_attn"]
 BOS = 1
 
 

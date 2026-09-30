@@ -142,6 +142,11 @@ def recurrent_fwd_flops(layer_specs) -> int:
     return sum(s.fwd_flops_per_token for s in layer_specs if isinstance(s, RecurrentLayerSpec))
 
 
+def recurrent_decode_flops(layer_specs) -> int:
+    return sum(s.fwd_flops_per_token if s.decode_flops_per_token is None else s.decode_flops_per_token
+               for s in layer_specs if isinstance(s, RecurrentLayerSpec))
+
+
 def recurrent_state_elems(layer_specs, feature_state_elems=0) -> int:
     """Elements of per-row inference state held by recurrent mixers (plus features that keep state,
     e.g. canon) -- constant however long the context, where attention's KV grows per token."""
@@ -189,14 +194,16 @@ class ModelStats:
     _kv_dtype_itemsize: int = field(repr=False, default=2)
     state_elems_per_row: int = 0       # recurrent mixers' + stateful features' per-row cache elements
     extra_fwd_flops_per_token: int = 0  # non-matmul, non-attention forward FLOPs per token
+    extra_decode_flops_per_token: int | None = None  # same for one decode step (None = same)
 
     @property
     def num_scaling_params(self) -> int:
         return self.params_by_role.get("matrix", 0) + self.params_by_role.get("unembedding", 0)
 
     def decode_flops(self, context_len: int) -> int:
-        return estimate_decode_flops(self.layer_specs, self.num_matmul_params, context_len,
-                                     self.extra_fwd_flops_per_token)
+        extra = self.extra_fwd_flops_per_token if self.extra_decode_flops_per_token is None \
+            else self.extra_decode_flops_per_token
+        return estimate_decode_flops(self.layer_specs, self.num_matmul_params, context_len, extra)
 
     def prefill_flops(self, num_tokens: int) -> int:
         return estimate_prefill_flops(self.layer_specs, self.num_matmul_params, num_tokens,

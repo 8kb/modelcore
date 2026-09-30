@@ -25,7 +25,7 @@ from modelcore.runtime import DEFAULT_RUNTIME, Runtime
 from modelcore.stats import (
     ModelStats, estimate_flops, feature_costs as _feature_costs, has_sliding_window as _has_sliding_window,
     kv_cache_spec as _kv_cache_spec, num_matmul_params as _num_matmul_params,
-    recurrent_fwd_flops as _recurrent_fwd_flops, recurrent_state_elems as _recurrent_state_elems,
+    recurrent_decode_flops as _recurrent_decode_flops, recurrent_fwd_flops as _recurrent_fwd_flops, recurrent_state_elems as _recurrent_state_elems,
     shape_summary as _shape_summary,
 )
 
@@ -81,7 +81,8 @@ class OptimizerHparams:
     weight_decay: float = 0.0
     adapter_lr: float = 0.002        # LoRA/DoRA A/B factors -- a starting guess, not yet swept
     adapter_scalar_lr: float = 0.02  # DoRA's per-channel magnitude -- likewise unswept
-    conv_lr: float = 0.02            # depthwise conv filters (short_conv, canon) -- likewise unswept
+    conv_lr: float = 0.02            # depthwise conv filters (short_conv, canon, mamba2) -- likewise unswept
+    ssm_lr: float = 0.02             # mamba2's A_log / dt_bias / D per-head vectors -- likewise unswept
 
 
 class ModelManager:
@@ -151,6 +152,8 @@ class ModelManager:
             # Depthwise conv filters: (n_embd, kernel_size) is no shape for Muon, and a filter this
             # small is not worth decaying.
             "conv": dict(kind='adamw', lr=hparams.conv_lr * dmodel_lr_scale, betas=(0.9, 0.95), eps=1e-10, weight_decay=0.0),
+            # SSM per-head scalars (A_log, dt_bias, D): tiny vectors, never weight-decayed.
+            "ssm": dict(kind='adamw', lr=hparams.ssm_lr * dmodel_lr_scale, betas=(0.9, 0.95), eps=1e-10, weight_decay=0.0),
         }
         param_groups = build_param_groups(collect_param_roles(model), policy)
         optimizer = MuonAdamW(param_groups)
@@ -286,6 +289,7 @@ class ModelManager:
             _kv_dtype_itemsize=self.runtime.compute_dtype.itemsize,
             state_elems_per_row=_recurrent_state_elems(layer_specs, feature_state_elems),
             extra_fwd_flops_per_token=extra_fwd_flops,
+            extra_decode_flops_per_token=feature_flops + _recurrent_decode_flops(layer_specs),
         )
 
     def new_kv_cache(self, model: Model, *, batch_size: int, seq_len: int, device=None) -> KVCache:

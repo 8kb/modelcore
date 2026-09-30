@@ -65,6 +65,7 @@ class RecurrentLayerSpec:
     kind: str
     state_elems: int
     fwd_flops_per_token: int = 0
+    decode_flops_per_token: int | None = None  # None = same as fwd; a chunked scan is dearer than its step
 
 
 @dataclass

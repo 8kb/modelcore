@@ -31,7 +31,7 @@ modelcore/
 ├── components/           linear, norm, rope, rotary, attention (the `attention` mixer, incl.
 │                         cross-layer KV sharing), mlp, block (the ONE block class), features
 │                         (output_gate, value_embed, resid_lambdas, canon, backout), conv (shared causal
-│                         depthwise conv + the `short_conv` mixer), embedding (+smear), unembedding
+│                         depthwise conv + the `short_conv` mixer), mamba2, embedding (+smear), unembedding
 ├── composers/             base, stack (the ONE body class)
 ├── convert.py              checkpoint converter v1/v2 -> v3 (`python -m modelcore.convert`)
 ├── roles.py               parameter-role protocol (optimizer grouping)
@@ -43,7 +43,7 @@ modelcore/
 ├── peft/                   AdapterLinear, LoRADelta/DoRADelta, apply_adapters/find_adapters/
 │                           merge_adapters/strip_adapters -- see "Adapters are config" below
 ├── optim/                  MuonAdamW
-├── kernels/                FA3/SDPA flash-attention interface
+├── kernels/                FA3/SDPA flash-attention interface; ssm.py (SSD scan reference + mamba_ssm)
 ├── cache.py                KVCache
 └── tests/                  this repo's own test suite
 ```
@@ -119,6 +119,11 @@ modelcore/
   there, so a new stateful mixer needs no cache change. Its `layer_spec()` states `state_elems`, a
   stateful *feature* states `state_elems()`/`fwd_flops_per_token()` -- otherwise `state_bytes_per_row`
   and the FLOPs figures silently omit it, the same failure mode as a matmul outside `Linear`.
+- **The SSM scan's kernel path is unverified without a GPU; the reference is the spec.**
+  `kernels/ssm.py`'s pure-PyTorch chunked SSD is checked against a sequential recurrence and is
+  what runs off CUDA; `mamba_chunk_scan_combined`/`selective_state_update` (hub:
+  `kernels-community/mamba-ssm`) are only compared to it in `TestKernelVsReference`, which skips
+  here. Reset state with masks, never a `-inf` decay (cumsum cancellation).
 - **Every layer kind honours `doc_args.doc_ids`.** A packed row must equal its documents run alone
   (a state that leaks across a boundary is silent corruption). The tests in
   `tests/test_recurrent.py` check it per mixer and per whole model, awake -- a fresh model

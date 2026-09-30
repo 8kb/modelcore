@@ -88,8 +88,15 @@ def _canon(kernel_size=4, sites=("pre_mixer", "pre_ffn")):
     return lambda: ComponentSpec("canon", {"kernel_size": kernel_size, "sites": list(sites)})
 
 
+def _mamba2_mixer(d_state=16, head_dim=16, expand=2, n_groups=1, kernel_size=4, chunk_size=8):
+    return ComponentSpec("mamba2", {
+        "d_state": d_state, "head_dim": head_dim, "expand": expand, "n_groups": n_groups,
+        "kernel_size": kernel_size, "chunk_size": chunk_size, "dt_min": 0.001, "dt_max": 0.1,
+        "dt_init_floor": 1e-4, "A_init_min": 1.0, "A_init_max": 16.0})
+
+
 def _mixed_like(kinds, n_head=2, n_embd=64, head_dim=32, vocab_size=128, sequence_len=32, window=-1,
-                canon=None, kernel_size=4):
+                canon=None, kernel_size=4, mamba=None):
     """Blocks whose mixer is per-layer `"attn"` or `"conv"` -- attention layers get explicit,
     contiguous kv_slots (in a hybrid, layer_idx is not a slot number). A model with no `"attn"`
     at all needs no rope. The FFN is llama-style, no other features; `canon` (a feature factory)
@@ -100,6 +107,8 @@ def _mixed_like(kinds, n_head=2, n_embd=64, head_dim=32, vocab_size=128, sequenc
         if kind == "attn":
             mixer = _mixer(n_head, n_head, head_dim, window, kv_slot=slot)
             slot += 1
+        elif kind == "mamba2":
+            mixer = _mamba2_mixer(**(mamba or {}))
         else:
             mixer = _conv_mixer(kernel_size)
         blocks.append(ComponentSpec("block", {
@@ -173,6 +182,9 @@ FLAVORS = {
     "conv_only": lambda: _mixed_like(["conv"] * 4),
     "hybrid_attn_conv": lambda: _mixed_like(["attn", "conv", "attn", "conv"]),
     "hybrid_win_canon": lambda: _mixed_like(["conv", "attn", "conv", "attn"], window=8, canon=_canon()),
+    "mamba2_only": lambda: _mixed_like(["mamba2"] * 3),
+    "mamba2_groups": lambda: _mixed_like(["mamba2"] * 2, mamba=dict(n_groups=2, chunk_size=4, head_dim=8, kernel_size=3)),
+    "hybrid_mamba2_attn": lambda: _mixed_like(["mamba2", "attn", "mamba2", "attn"], window=8),
     "llama_canon_mixer_only": lambda: _mixed_like(["attn"] * 3, canon=_canon(3, ("pre_mixer",))),
 }
 
