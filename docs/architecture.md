@@ -202,6 +202,28 @@ shared instance adds nothing to `state_dict()` and every existing checkpoint loa
 `rms_norm`'s `"eps": null` means torch's own default — the input dtype's machine epsilon — which is
 what every model trained before norm was configurable used, so it is a real value, not a placeholder.
 
+### Gated attention
+
+`gated_gpt_block` / `gated_plain_block` are `gpt_block` / `plain_block` plus a required nested
+`attn_gate` spec: after SDPA and before `c_proj`, `y = y * sigmoid(W_g · x[..., :in_channels])`, where
+`x` is the block's normed attention input (Qwen "Gated Attention", G1 placement).
+
+```json
+"attn_gate": {"#type": "attn_gate", "granularity": "block", "block_size": 8, "in_channels": null}
+```
+
+| `granularity` | gates | `block_size` |
+|---|---|---|
+| `head` | `n_head` | `null` |
+| `element` | `n_head * head_dim` | `null` |
+| `block` | `n_head * head_dim / block_size` (contiguous outputs inside a head) | positive int dividing `head_dim` |
+
+`in_channels: null` means all `n_embd` residual channels feed the gate (same "null = derive"
+convention as `head_dim`); otherwise the first `in_channels`. `block_size` is required in every spec.
+The gate projection is a `Linear` (role `matrix`, counted in matmul FLOPs). These are new block types
+rather than a new param on the old ones so every existing v2 config and checkpoint keeps loading
+with no format bump.
+
 ### Only concrete, already-decided values — no rules
 
 A config tree carries no *derivation rules*, only their already-computed output. Every value that

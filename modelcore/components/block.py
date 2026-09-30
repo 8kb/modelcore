@@ -4,6 +4,7 @@ import torch.nn as nn
 from modelcore.catalog import register_component
 from modelcore.components.attention import CausalSelfAttention
 from modelcore.components.contracts import BaseBlock
+from modelcore.config.spec import ComponentSpec
 
 
 def _validate_attention_shape(params, ctx):
@@ -46,6 +47,32 @@ def _validate_plain_block(params, ctx):
     if not params.get("produces_kv", True) and params.get("kv_slot") is None:
         errors.append("produces_kv=False requires an explicit kv_slot pointing at the producer layer")
     return errors
+
+
+def _validate_attn_gate_fit(params, ctx):
+    """The gate spec must be an attn_gate, and a `block` gate's block_size must divide head_dim
+    (explicit, or n_embd // n_head when null) -- only known here, where the attention dims live."""
+    gate = params.get("attn_gate")
+    if not isinstance(gate, ComponentSpec) or gate.type != "attn_gate":
+        return [f"attn_gate must be a component spec of type 'attn_gate', got {gate!r}"]
+    if gate.params.get("granularity") != "block":
+        return []
+    block_size = gate.params.get("block_size")
+    head_dim = params.get("head_dim")
+    n_head, n_embd = params.get("n_head"), ctx.get("n_embd")
+    if head_dim is None and n_head and n_embd is not None and n_embd % n_head == 0:
+        head_dim = n_embd // n_head
+    if isinstance(block_size, int) and isinstance(head_dim, int) and block_size > 0 and head_dim % block_size != 0:
+        return [f"head_dim ({head_dim}) must be divisible by attn_gate.block_size ({block_size})"]
+    return []
+
+
+def _validate_gated_gpt_block(params, ctx):
+    return _validate_gpt_block(params, ctx) + _validate_attn_gate_fit(params, ctx)
+
+
+def _validate_gated_plain_block(params, ctx):
+    return _validate_plain_block(params, ctx) + _validate_attn_gate_fit(params, ctx)
 
 
 @register_component("gpt_block", needs=("n_embd", "padded_vocab_size", "rope", "norm", "runtime"), validate=_validate_gpt_block)
@@ -126,3 +153,28 @@ class PlainBlock(BaseBlock):
         x = x + self.attn(self.norm(x), idx, kv_cache, kv_bus, doc_args)
         x = x + self.mlp(self.norm(x))
         return x
+
+
+@register_component("gated_gpt_block", needs=("n_embd", "padded_vocab_size", "rope", "norm", "runtime"),
+                    validate=_validate_gated_gpt_block)
+class GatedBlock(Block):
+    """gpt_block plus an output gate on attention (the nested `attn_gate` spec). A separate block
+    type, not a param on gpt_block, so every existing v2 config and checkpoint stays valid."""
+
+    def __init__(self, n_embd, n_head, n_kv_head, layer_idx, window, rope, norm, padded_vocab_size,
+                 resid_lambda_init, x0_lambda_init, has_value_embed, mlp, head_dim, attn_gate, runtime=None):
+        super().__init__(n_embd, n_head, n_kv_head, layer_idx, window, rope, norm, padded_vocab_size,
+                         resid_lambda_init, x0_lambda_init, has_value_embed, mlp, head_dim, runtime=runtime)
+        self.attn.attach_gate(attn_gate)
+
+
+@register_component("gated_plain_block", needs=("n_embd", "padded_vocab_size", "rope", "norm", "runtime"),
+                    validate=_validate_gated_plain_block)
+class GatedPlainBlock(PlainBlock):
+    """plain_block plus an output gate on attention (the nested `attn_gate` spec); see GatedBlock."""
+
+    def __init__(self, n_embd, n_head, n_kv_head, layer_idx, window, rope, norm, padded_vocab_size,
+                 kv_slot, produces_kv, mlp, head_dim, attn_gate, runtime=None):
+        super().__init__(n_embd, n_head, n_kv_head, layer_idx, window, rope, norm, padded_vocab_size,
+                         kv_slot, produces_kv, mlp, head_dim, runtime=runtime)
+        self.attn.attach_gate(attn_gate)

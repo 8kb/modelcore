@@ -289,6 +289,8 @@ def _as_v1(d):
     d = copy.deepcopy(d)
     n_embd, seq = d["n_embd"], d["sequence_len"]
     d["format"] = FORMAT_V1
+    if "gated_" in json.dumps(d["body"]):
+        pytest.skip("gated blocks postdate v1")
     if d.pop("template") != "base":
         pytest.skip("only 'base' is implicit in v1")
     if d["pad_vocab_size_to"] == 64:

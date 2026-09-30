@@ -234,3 +234,93 @@ def test_rotary_embedding_no_cache_uses_zero_offset():
     q_rot, k_rot = rope(q, k, kv_cache=None)
     assert torch.equal(q_rot, apply_rotary_emb(q, rope.cos[:, :3], rope.sin[:, :3]))
     assert torch.equal(k_rot, apply_rotary_emb(k, rope.cos[:, :3], rope.sin[:, :3]))
+
+
+# -----------------------------------------------------------------------------
+# attn_gate
+
+import pytest
+
+from modelcore import ComponentSpec
+from modelcore.config.validate import validate_config
+from modelcore.tests.conftest import _gate, _gpt_like, _plain_like, build
+from modelcore import ModelManager
+from modelcore.components.attn_gate import AttnGate
+
+
+def _bound(granularity, block_size=None, in_channels=None, n_embd=64, n_head=2, head_dim=32):
+    g = AttnGate(n_embd, granularity, block_size, in_channels)
+    g.bind(n_head, head_dim)
+    return g
+
+
+@pytest.mark.parametrize("granularity,block_size,in_channels,out,fan_in", [
+    ("head", None, None, 2, 64),
+    ("element", None, None, 64, 64),
+    ("block", 8, None, 8, 64),
+    ("block", 8, 16, 8, 16),
+])
+def test_attn_gate_proj_shape(granularity, block_size, in_channels, out, fan_in):
+    assert _bound(granularity, block_size, in_channels).proj.weight.shape == (out, fan_in)
+
+
+def test_attn_gate_block_matches_manual_repeat_interleave():
+    torch.manual_seed(0)
+    g = _bound("block", 8)
+    x, y = torch.randn(2, 5, 64), torch.randn(2, 5, 2, 32)
+    gates = torch.sigmoid(x @ g.proj.weight.T).view(2, 5, 2, 4)
+    expected = y * gates.repeat_interleave(8, dim=-1)
+    assert torch.allclose(g(x, y), expected, atol=1e-6)
+
+
+def test_attn_gate_element_matches_block_with_tiled_weights():
+    torch.manual_seed(0)
+    blk, el = _bound("block", 8), _bound("element")
+    with torch.no_grad():
+        el.proj.weight.copy_(blk.proj.weight.view(2, 4, 64).repeat_interleave(8, dim=1).reshape(64, 64))
+    x, y = torch.randn(2, 5, 64), torch.randn(2, 5, 2, 32)
+    assert torch.allclose(blk(x, y), el(x, y), atol=1e-6)
+
+
+def test_attn_gate_in_channels_ignores_later_channels():
+    torch.manual_seed(0)
+    g = _bound("head", in_channels=16)
+    x, y = torch.randn(1, 3, 64), torch.randn(1, 3, 2, 32)
+    x2 = x.clone()
+    x2[..., 16:] += 5.0
+    assert torch.allclose(g(x, y), g(x2, y))
+
+
+def _errors(config):
+    return [e.message for e in validate_config(config).errors]
+
+
+@pytest.mark.parametrize("gate,needle", [
+    (_gate("bogus"), "granularity"),
+    (_gate("head", 8), "block_size must be null"),
+    (_gate("block", None), "block_size"),
+    (_gate("block", 5), "divisible"),
+    (_gate("head", in_channels=65), "in_channels"),
+])
+def test_attn_gate_validation_errors(gate, needle):
+    assert any(needle in m for m in _errors(_gpt_like(attn_gate=gate)))
+
+
+def test_gated_block_requires_attn_gate():
+    config = _gpt_like(attn_gate=_gate("head"))
+    del config.body.params["blocks"][0].params["attn_gate"]
+    assert _errors(config)
+
+
+def test_attn_gate_role_is_matrix():
+    from modelcore.roles import collect_param_roles
+    model = build(ModelManager(), _gpt_like(attn_gate=_gate("head")))
+    gate_ids = {id(p) for n, p in model.named_parameters() if ".gate.proj." in n}
+    assert gate_ids
+    assert gate_ids <= {id(p) for p in collect_param_roles(model)["matrix"]}
+
+
+def test_attn_gate_adds_exact_matmul_params():
+    base = ModelManager().stats(_plain_like())
+    gated = ModelManager().stats(_plain_like(attn_gate=_gate("block", 8, in_channels=16)))
+    assert gated.num_matmul_params - base.num_matmul_params == 4 * (2 * 4 * 16)

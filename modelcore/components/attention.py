@@ -39,11 +39,16 @@ class CausalSelfAttention(nn.Module):
     flash_attn.flash_attn_func unchanged, training only (always None when kv_cache is not None;
     see Model.forward). This module doesn't derive it from idx itself: doc_args is per-batch
     runtime data built once outside torch.compile and threaded through like kv_bus, not a
-    per-layer policy."""
+    per-layer policy.
+
+    Output gating: an optional attn_gate component (see modelcore.components.attn_gate), given as
+    `gate` or attached afterwards with attach_gate(), multiplies the per-head attention output by
+    a sigmoid gate computed from this layer's normed input, right before c_proj. It touches only
+    the output, so it works unchanged for KV-sharing consumer layers and on the kv-cache path."""
     PARAM_ROLES = {"value_embed": "value_embedding"}
 
     def __init__(self, n_embd, n_head, n_kv_head, layer_idx, window, rope, norm, padded_vocab_size, has_value_embed,
-                 head_dim, kv_slot=None, produces_kv=True, runtime=None):
+                 head_dim, kv_slot=None, produces_kv=True, runtime=None, gate=None):
         super().__init__()
         assert produces_kv or not has_value_embed, "a KV-sharing consumer layer cannot have its own value embedding"
         self.runtime = runtime or DEFAULT_RUNTIME
@@ -73,6 +78,13 @@ class CausalSelfAttention(nn.Module):
         self.value_embed = nn.Embedding(padded_vocab_size, kv_dim) if has_value_embed else None
         self.ve_gate_channels = 12
         self.ve_gate = Linear(self.ve_gate_channels, n_kv_head, bias=False) if has_value_embed else None
+        self.gate = None
+        if gate is not None:
+            self.attach_gate(gate)
+
+    def attach_gate(self, gate):
+        gate.bind(self.n_head, self.head_dim)
+        self.gate = gate
 
     @torch.no_grad()
     def init_weights(self):
@@ -89,6 +101,8 @@ class CausalSelfAttention(nn.Module):
         if self.ve_gate is not None:
             # Gate weights init with small positive values so gates start slightly above neutral
             torch.nn.init.uniform_(self.ve_gate.weight, 0.0, 0.02)
+        if self.gate is not None:
+            self.gate.init_weights()
 
     def layer_spec(self):
         return AttentionLayerSpec(n_head=self.n_head, n_kv_head=self.n_kv_head, head_dim=self.head_dim,
@@ -142,6 +156,9 @@ class CausalSelfAttention(nn.Module):
                 causal=True,
                 window_size=window_size,
             )
+
+        if self.gate is not None:
+            y = self.gate(x, y)
 
         # Re-assemble the heads and project back to residual stream
         y = y.contiguous().view(B, T, -1)
