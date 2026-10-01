@@ -9,6 +9,9 @@ consumption contract) see [llmllab/AGENTS.md](../llmllab/AGENTS.md) and
 
 All code, comments, docs, commit messages, and any other text committed to git MUST be in English.
 
+Lineage: this family descends from karpathy/nanochat via our fork `8kb/nanochat` (archived).
+Principles (KISS/DRY/YAGNI/SOLID) and the provenance rule: [llmllab/AGENTS.md](../llmllab/AGENTS.md#style).
+
 A host application pins this repo by git tag (`pyproject.toml`'s `[tool.uv.sources]`) and consumes
 it entirely through `ModelManager` — see [`llmllab/AGENTS.md`](../llmllab/AGENTS.md)'s family map
 for which repos currently do that, and each one's own `docs/architecture.md` for its side of the
@@ -57,14 +60,14 @@ modelcore/
   meta-device footgun" in [docs/architecture.md](docs/architecture.md).
 - **No `torch.amp.autocast`.** Precision is `Runtime.compute_dtype`, injected into any component
   declaring `needs=("runtime",)` — not a bare global read off an attribute. Model weights stay
-  fp32; `components/linear.py`'s `Linear` casts to `compute_dtype` in `forward()`. Route every
+  fp32; `components/linear.py`'s `Linear` casts its weight to the input's dtype (`x.dtype`) in `forward()`. Route every
   matmul-participating parameter through it.
 - **`Linear` is the structural marker for "matmul params".** `stats.num_matmul_params` finds every
   FLOPs-relevant parameter by scanning for `isinstance(m, Linear)`. A new matmul that uses a raw
   `nn.Linear` or bare `nn.Parameter` silently disappears from `ModelStats.flops_per_token`/
   `decode_flops`/`prefill_flops` and every FLOPs/s or MFU number derived from them. This is also
   why `precision/fp8.py`'s `Float8Linear` subclasses `Linear` rather than a bare `nn.Linear` — it
-  used to subclass `nn.Linear` directly (pre-Stage-8, in nanochat's own `nanochat/fp8.py`), which
+  used to subclass `nn.Linear` directly (pre-Stage-8, in our nanochat fork's `nanochat/fp8.py`), which
   meant an fp8-converted model's `collect_param_roles` raised outright (`Float8Linear.weight has no
   declared role`) the moment `ModelManager.create_optimizer` tried to build its param groups.
 - **Every parameter needs a declared role.** `roles.collect_param_roles` walks the module tree and
@@ -81,10 +84,10 @@ modelcore/
   and the config is rejected, not completed. **Only `config/upgrade.py` may supply a value**
   — its job is to write v1's implicit choices out so an old config builds the same model. Don't add
   a `=default` to a component constructor param that a config can set to save a line in a test.
-  a `value_embed` feature is present or absent per layer, `window` a concrete int, `kv_slot`/`produces_kv`
+  Concretely: a `value_embed` feature is present or absent per layer, `window` a concrete int, `kv_slot`/`produces_kv`
   concrete per-block values — never a pattern string or a fraction a component would need to
   interpret. Every rule that produces these values lives one layer up, in the host application's
-  own preset/depth-dial layer (`nanochat/architectures/derive.py`, `tinylab/presets.py`), run once
+  own preset/depth-dial layer, run once
   at tree-expansion time, outside this package entirely. A component asking "which layer am I" or
   "how many layers are there" to re-derive a policy is exactly the abstraction leak this package's
   design eliminated.
@@ -148,7 +151,8 @@ modelcore/
   them back, so they round-trip. Keep it that way: a comment in `params` would be a validation
   error and indistinguishable from a mistyped param. Conversely an unknown top-level key without
   the `_` is an error (`ModelConfig.from_dict`), never silently dropped.
-- **`template`, `meta`, `tokenizer` are declarative/opaque.** `template` (`"base"`/`"nanochat"`) is
+- **`template`, `meta`, `tokenizer` are declarative/opaque.** `template` (`"base"`/`"chat_tools"`; the old
+  spelling `"nanochat"` is accepted as a load-time alias) is
   validated against `TEMPLATES` and read by nothing yet; `meta` and `tokenizer` are carried, never
   interpreted or cross-checked — modelcore knows nothing about tokenizers, so a host reconciles
   `tokenizer` against `vocab_size` itself.
@@ -160,8 +164,7 @@ modelcore/
 - **`ArtifactStore` is a real code path, not aspirational.** Saving/loading always goes through an
   `ArtifactStore` (`FileSystemStore` is the built-in one) — never `torch.save`/`torch.load`
   directly. A host application adapting an old on-disk format should subclass the store, not add a
-  third way to read/write the same files (nanochat's `LegacyCheckpointStore` is a worked example —
-  see its own [docs/architecture.md](https://github.com/8kb/nanochat/blob/master/docs/architecture.md)).
+  third way to read/write the same files .
 - **Optimizer state is checkpointed and reloaded positionally.** `torch.optim.Optimizer.state_dict()`
   flattens every parameter across every group into one global index order; a parameter that
   splits, merges, or moves group changes that indexing, and a same-size reorder corrupts state
@@ -169,7 +172,7 @@ modelcore/
   dict order is therefore part of the on-disk format, not just a style choice — see
   [docs/architecture.md#component-contracts](docs/architecture.md#component-contracts). A change
   that reorders or resplits needs a migration path in whichever host application has old shards to
-  read, or they fail to load (nanochat's `nanochat/architectures/legacy.py` is a worked example).
+  read, or they fail to load.
 - **`kv_cache.advance()` belongs to `Model.forward`, not the last attention layer.** It fires once,
   after the whole block/composer loop runs — broken the moment a model has fewer KV slots than
   layers (cross-layer KV sharing), since no layer's index then equals the slot count.
@@ -234,7 +237,7 @@ modelcore/
   own children with the right `base_weight` argument), and a second, duck-typed call directly on
   the delta would both waste RNG draws and hard-fail DoRA, whose signature requires `base_weight`.
 - **New optimizer roles (`"adapter"`, `"adapter_scalar"`) are appended at the end of the policy
-  dict**, same rule as every other role — see the optimizer-state-is-positional invariant below.
+  dict**, same rule as every other role — see the optimizer-state-is-positional invariant above.
 - **`build_param_groups` drops any `requires_grad=False` parameter**, not just leaves it ungrouped
   — a frozen or disabled-adapter parameter's `.grad` is always `None`, and `MuonAdamW.step()`
   dereferences it unconditionally.

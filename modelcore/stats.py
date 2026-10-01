@@ -180,8 +180,8 @@ class ModelStats:
     """Frozen snapshot ModelManager.stats(config) returns -- everything about a config's shape,
     parameter counts, and cost that doesn't need real weights. params_by_role uses modelcore's
     generic role names (see modelcore.roles); num_scaling_params is the matrix+unembedding
-    convention that gives the cleanest scaling laws (see dev/LOG.md Jan 27, 2026 for the original
-    finding) -- callers wanting a different combination can read params_by_role directly."""
+    convention that gives the cleanest scaling laws (upstream karpathy/nanochat's dev/LOG.md,
+    Jan 27 2026, has the original finding) -- callers wanting a different combination can read params_by_role directly."""
     n_layer: int
     params_by_role: dict
     num_params: int

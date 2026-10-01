@@ -91,7 +91,7 @@ entering orthogonalization is better conditioned (https://arxiv.org/abs/2603.282
 2) Muon+ renormalization: snap the Frobenius norm to sqrt(min(m, n)), the norm of an exactly
 semi-orthogonal matrix, correcting for under-convergence of the polar iteration (https://arxiv.org/abs/2602.21545)
 
-Some of the changes in nanochat implementation:
+Some of the changes relative to upstream karpathy/nanochat's implementation:
 - Uses a simpler, more general approach to parameter grouping and stacking
 - Uses a single fused kernel for the momentum -> polar_express -> variance_reduction -> update step
 - Makes no assumptions about model architecture (e.g. that attention weights are fused into QKVO format)

@@ -97,7 +97,7 @@ class AdapterSpec:
 
     `target` is a module FQN relative to the Model root (e.g. "body.blocks.3.attn.c_q", exactly
     what Model.get_submodule resolves) -- concrete, never a pattern or a layer range; a host-side
-    low-code layer (e.g. nanochat.architectures.adapters.expand_adapters) is what turns "every
+    low-code layer is what turns "every
     attn.c_q" into a list of these. `name` is the stable handle a caller enables/disables/re-adds
     an adapter by, and the key its delta's own params live under in the state dict (target +
     ".deltas." + name + ...) -- see modelcore.peft.apply.AdapterLinear. `type` names an entry in

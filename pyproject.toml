@@ -14,7 +14,7 @@ dependencies = [
 #
 # kernels pinned EXACTLY, not >=: flash_attn.py's get_kernel(repo_id) calls pass no version=/
 # revision=, which kernels>=0.15 hard-errors on (deprecated since 0.12; see
-# https://huggingface.co/docs/kernels/migration). nanochat's own uv.lock has run this exact code
+# https://huggingface.co/docs/kernels/migration). our nanochat fork's own uv.lock ran this exact code
 # successfully across dozens of real GPU runs, pinned at exactly this version -- modelcore, as a
 # freshly extracted package (2026-09-09) with its own independently-resolved lockfile, floated
 # past that breaking change on a fresh `uv sync` even though this call site never changed. Pin to

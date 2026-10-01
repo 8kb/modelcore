@@ -400,7 +400,7 @@ Anything that reads tree internals (a block's `params["window"]`, an adapter FQN
 
 A config tree carries no *derivation rules*, only their already-computed output. Every value that
 used to be a rule lives outside `modelcore`, run once at tree-expansion time, in the host
-application's own preset/depth-dial layer (`nanochat/architectures/derive.py`, `tinylab/presets.py`):
+application's own preset/depth-dial layer:
 
 - a `value_embed` feature present or absent per layer — not a `None` meaning "derive the
   alternating-by-parity pattern from `n_layer`". `Block` doesn't take `n_layer` at all, because it
@@ -594,9 +594,7 @@ the host.
 A store is deliberately narrow and duck-typed (not an ABC) — `ArtifactStore` is a protocol, not a
 base class a caller is required to subclass. This is the seam a host application uses to adapt an
 old, pre-`modelcore` format onto `ModelManager` without core ever learning that old formats exist —
-`modelcore` itself never has a legacy code path. See
-[nanochat's `LegacyCheckpointStore`](https://github.com/8kb/nanochat/blob/master/docs/architecture.md)
-for a worked example.
+`modelcore` itself never has a legacy code path.
 
 ## `Runtime`: no more ambient globals
 
@@ -605,10 +603,7 @@ config: `compute_dtype` and a log sink. A component that needs it declares `need
 same mechanism as `rope` or `n_embd`. `detect_compute_dtype()` reads `MODELCORE_DTYPE` from the
 environment (CUDA capability, else fp32, as a fallback); a host application's own
 `COMPUTE_DTYPE`-shaped global should source its value from `modelcore.runtime.DEFAULT_RUNTIME`
-rather than the other way around, since `modelcore` has zero dependencies on its host (both
-`nanochat.common.COMPUTE_DTYPE`/`COMPUTE_DTYPE_REASON` and `tinylab.runtime.COMPUTE_DTYPE`/
-`COMPUTE_DTYPE_REASON` do exactly this; nanochat's also accepts `NANOCHAT_DTYPE` as a back-compat
-alias for `MODELCORE_DTYPE`).
+rather than the other way around, since `modelcore` has zero dependencies on its host.
 
 The same module also holds `compute_init(device_type="cuda", *, seed=42, backend="nccl", log=None)`
 /`compute_cleanup()` (device/seed/DDP bring-up: seeds torch, sets tf32 matmul precision on CUDA,
@@ -662,8 +657,7 @@ nothing about what presets exist, only that `ModelConfig.reference` is its own f
    decorator runs.
 5. If it needs testing at the tree level rather than in isolation, add a flavor to
    `modelcore/tests/conftest.py`'s `FLAVORS` dict. If it should be reachable from a host
-   application's own depth-dial CLI, add it there too (`nanochat/architectures/presets.py`,
-   `tinylab/presets.py`).
+   application's own depth-dial CLI, add it there too.
 
 ## Cross-layer KV sharing
 
@@ -860,9 +854,8 @@ rather than clobber.
 
 None of this knows about tokenizers or special-token *names* — a host resolves its own special
 tokens to ids and, for tools, supplies what a captured expression actually evaluates to (`run`);
-`nanochat.engine.Engine`/`tinylab.engine.Engine` are both now thin adapters over exactly this loop,
-each still owning its own `use_calculator` (the `eval()` sandbox) as the one `ToolSpec.run`
-callback — the loop moved, the tool's own logic didn't.
+a host's engine is a thin adapter over exactly this loop, owning its own tool logic (e.g. an
+`eval()` sandbox) as the one `ToolSpec.run` callback.
 
 ## Bits-per-byte evaluation
 
@@ -905,12 +898,12 @@ potentially different order) — this does not affect *loading* an existing chec
 values fully override whatever `init_weights()` produced), only bit-for-bit reproducibility of a
 brand-new from-scratch run at a given seed. This is why a host application's own regression
 goldens should load real saved weights into a freshly-built model rather than comparing two
-independently-seeded `init_weights()` calls (nanochat's `tests/goldens/tiny/*` is a worked example).
+independently-seeded `init_weights()` calls (a host carrying such goldens keeps them in its own repo).
 
 ## Precision
 
-Weight tensors stay fp32 (for optimizer precision); `modelcore.components.linear.Linear` casts to
-`Runtime.compute_dtype` in `forward()`. Any new component should route its matmul weights through
+Weight tensors stay fp32 (for optimizer precision); `modelcore.components.linear.Linear` casts its
+weight to the input's dtype (`x.dtype`, which is `Runtime.compute_dtype` after the embedding) in `forward()`. Any new component should route its matmul weights through
 `Linear` rather than a raw `nn.Linear`, both for this precision policy and so
 `modelcore.stats.num_matmul_params` sees it — it's the structural marker that accounting scans
 for, and the same marker `modelcore.precision.fp8` swaps in place of.
@@ -920,9 +913,9 @@ for, and the same marker `modelcore.precision.fp8` swaps in place of.
 `modelcore`'s own net is its parametrized suite (`modelcore/tests/test_manager.py`, run over every
 flavor in `conftest.py`'s `FLAVORS` dict): validation, forward/backward finiteness, param-role
 partitioning, optimizer-group partitioning, layer-spec/KV-cache-spec consistency, seed
-reproducibility, and save/load round trips. There is no golden-fixture suite inside this repo —
-this package's own tests establish correctness of a *new* build from scratch, not bit-for-bit
-equivalence with some prior version.
+reproducibility, and save/load round trips. The one golden set here, `modelcore/tests/goldens/` (used by `test_v3_migration.py`), holds v2
+checkpoints whose logits must stay bit-identical through the v2→v3 upgrade and converter. Goldens
+proving a *host's* behavior across a refactor live in that host, not here.
 
 ```bash
 python -m pytest modelcore/tests -v
@@ -953,13 +946,5 @@ this repo's.** A change here that a host depends on should be checked against th
 suite too, after an editable install (`uv pip install -e ../modelcore` from its venv) — passing
 modelcore's own suite is necessary but not proof a host is unaffected. See
 [`llmllab/docs/subsystem-conventions.md`](../llmllab/docs/subsystem-conventions.md)'s tag-bump rule
-for the general contract. nanochat is a worked example of a host carrying its own regression
-goldens for this: its `tests/goldens/*.json` (including the four `tiny_composed_*` presets —
-modelcore's own pre-Stage-7 baseline; see
-[`llmllab/docs/subsystem-conventions.md`](../llmllab/docs/subsystem-conventions.md#where-a-golden-belongs)
-for why a golden proving a *host's* behavior lives in the host, not here, even when the code it
-covers moved into a subsystem) record real accounting numbers, generation, and forward logits
-against known checkpoints, replayed by
-`tests/test_goldens.py`/`tests/test_architectures.py` — see
-[nanochat's docs/architecture.md](https://github.com/8kb/nanochat/blob/master/docs/architecture.md#verifying-a-change-is-behavior-preserving)
-for how that host layer verifies its own changes.
+and its [golden-placement section](../llmllab/docs/subsystem-conventions.md#where-a-golden-belongs)
+for the general contract.

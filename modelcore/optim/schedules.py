@@ -1,14 +1,11 @@
 """
 LR-multiplier / Muon-momentum step schedules: pure functions of the step index, no optimizer or
-model in scope. Moved here from two near-identical copies (nanochat's scripts/base_train.py,
-tinylab's tinylab/ops/train.py's _lr_schedule) -- the shapes themselves are a good default, kept
-overridable via keyword args; the actual param-group mutation that reads these values is
+model in scope. The shapes are a good default, overridable via keyword args; the actual param-group mutation that reads these values is
 ModelManager.apply_schedule, since it touches the optimizer's own on-disk format (see that
 method's docstring).
 
-momentum_warmup_steps is the one place the two ported copies disagreed (nanochat hardcoded 400;
-tinylab capped at num_iterations // 3 so a short run's warmup didn't eat the whole horizon) -- kept
-as a parameter rather than picked one way, so each caller keeps its own number.
+momentum_warmup_steps is a parameter rather than a constant: a short run's warmup can otherwise eat
+the whole horizon, so a caller may cap it (e.g. at num_iterations // 3).
 """
 
 

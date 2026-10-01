@@ -114,8 +114,8 @@ def apply_adapters(model, specs):
 
 def find_adapters(model):
     """Every (fqn, AdapterLinear) in model, in module-tree order -- the read side of
-    apply_adapters, used by ModelManager.stats/load_model/merge_adapters and by nanochat's
-    model_info.py inventory listing."""
+    apply_adapters, used by ModelManager.stats/load_model/merge_adapters and
+    available to a host's inventory listing."""
     return [(name, module) for name, module in model.named_modules() if isinstance(module, AdapterLinear)]
 
 

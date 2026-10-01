@@ -1,9 +1,8 @@
 """
 Tests for modelcore/generate.py: sample_next_token, generate_naive, and Decoder (via
 ModelManager.new_decoder) -- the generic, tokenizer-agnostic half of autoregressive generation.
-nanochat.engine.Engine layers tool-use/chat-token state on top of the same Decoder; the
-Engine-level equivalence check (against real checkpoints) lives in tests/test_goldens.py and
-tests/test_generate.py -- this file proves the primitive itself, standalone.
+A host's engine layers tool-use/chat-token state on top of the same Decoder; this file proves the
+primitive itself, standalone.
 
 python -m pytest modelcore/tests/test_generate.py -v
 """

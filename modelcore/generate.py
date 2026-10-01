@@ -1,13 +1,11 @@
 """
 Generic (tokenizer-agnostic) autoregressive generation primitives: sampling, a naive
 recompute-every-step reference implementation, Decoder -- a cached prefill+decode primitive built
-on ModelManager.new_kv_cache -- and generate_with_tools/collect_batch, the tool-use decode loop
-both nanochat's and tinylab's Engine used to duplicate line-for-line. None of this knows about
-tokenizers or special-token *names*; a host resolves its own special tokens to ids and (for tools)
-supplies a ToolSpec per tool -- what the tool's own logic (e.g. nanochat/tinylab's use_calculator,
-an eval() sandbox) does with the captured token ids stays entirely on the host side, passed in as
-ToolSpec.run. Engine, the class that owns a tokenizer and satisfies benchcore's Generator protocol,
-still belongs to the host application; this module only provides the loop it's built on.
+on ModelManager.new_kv_cache -- and generate_with_tools/collect_batch, the tool-use decode loop.
+None of this knows about tokenizers or special-token *names*; a host resolves its own special
+tokens to ids and (for tools) supplies a ToolSpec per tool -- what the tool's own logic (e.g. a
+calculator) does with the captured token ids stays entirely on the host side, passed in as
+ToolSpec.run. A class that owns a tokenizer on top of this loop belongs to the host.
 """
 from collections import deque
 from dataclasses import dataclass
@@ -127,10 +125,8 @@ class Decoder:
 
 
 # -----------------------------------------------------------------------------
-# Tool-use decode loop. Moved from two identical copies (nanochat.engine.Engine.generate,
-# tinylab.engine.Engine.generate) -- everything here is token-id bookkeeping around Decoder; the
-# one genuinely host-specific piece (what a captured expression evaluates to) is ToolSpec.run,
-# supplied by the caller.
+# Tool-use decode loop. Everything here is token-id bookkeeping around Decoder; the one
+# caller-specific piece (what a captured expression evaluates to) is ToolSpec.run.
 
 
 @dataclass

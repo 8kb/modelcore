@@ -6,13 +6,10 @@ never read off a module-level global -- see catalog.py's build context.
 
 The host application's own COMPUTE_DTYPE-shaped global, if it has one, should source its value
 from DEFAULT_RUNTIME below, not the other way around: modelcore has zero dependencies on its host,
-so everything outside it adapts to modelcore's values instead of the reverse (see nanochat/common.py
-for this repo's example).
+so everything outside it adapts to modelcore's values instead of the reverse.
 
-Also home to compute_init/compute_cleanup (the device/seed/DDP bring-up every host's training/eval
-entrypoint needs, moved here from two identical copies -- nanochat's nanochat/common.py and
-tinylab's tinylab/runtime.py) and the GPU peak-FLOPs/peak-bandwidth tables (MFU/MBU denominators;
-previously only in nanochat/common.py). Neither is part of the injected-runtime-value contract
+Also home to compute_init/compute_cleanup (the device/seed/DDP bring-up a training/eval
+entrypoint needs) and the GPU peak-FLOPs/peak-bandwidth tables (MFU/MBU denominators). Neither is part of the injected-runtime-value contract
 above (no component ever needs a device or a peak-flops number); they live here because this is
 where a host's own runtime-bringup module already imports COMPUTE_DTYPE from, not because they're
 part of the Runtime/DEFAULT_RUNTIME class.
@@ -63,11 +60,8 @@ DEFAULT_RUNTIME = Runtime()
 
 
 # -----------------------------------------------------------------------------
-# Device/DDP/seed bring-up. Ported from two identical copies (nanochat/nanochat/common.py,
-# tinylab/tinylab/runtime.py) -- moved here rather than split into a new module because both
-# copies already lived alongside their host's own COMPUTE_DTYPE re-export. compute_init's return
-# shape (a 5-tuple) is kept exactly as both hosts already unpack it, so this is a pure import-path
-# change at every existing call site.
+# Device/DDP/seed bring-up. Ported from our nanochat fork's common.py (archived); compute_init
+# returns a 5-tuple.
 
 
 def is_ddp_requested() -> bool:
@@ -132,12 +126,12 @@ def compute_cleanup():
 
 
 # -----------------------------------------------------------------------------
-# GPU peak-FLOPs/peak-bandwidth tables: MFU/MBU denominators. Ported from
-# nanochat/nanochat/common.py (tinylab dropped these when it was ported -- see tinylab/AGENTS.md).
+# GPU peak-FLOPs/peak-bandwidth tables: MFU/MBU denominators. Ported from our nanochat fork's
+# common.py (archived).
 # Pure hardware facts, extendable/replaceable by a caller (pass a different table to the lookup
 # functions, or just index the tuples directly).
 # inspired by torchtitan: https://github.com/pytorch/torchtitan/blob/main/torchtitan/tools/utils.py
-# and PR: https://github.com/karpathy/nanochat/pull/147
+# and PR: https://github.com/karpathy/nanochat/pull/147 (upstream)
 
 # hardcoded BF16 peak flops for various GPUs. Table order matters: more specific patterns first.
 PEAK_FLOPS_TABLE = (

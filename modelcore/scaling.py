@@ -4,10 +4,8 @@ derive the training horizon (iterations/tokens), batch size, and the learning-ra
 corrections that follow from it. Pure math, no I/O, architecture-agnostic -- it only needs scalar
 counts, not a model, so it computes the same numbers whether or not anything actually trains.
 
-Moved here from two identical copies (nanochat's nanochat/scaling.py, tinylab's own
-tinylab/ops/train.py) -- every input is a plain scalar and every output feeds
-modelcore.OptimizerHparams, so this was training-loop policy duplicated across hosts rather than
-anything host-specific. nanochat/nanochat/scaling.py is now a backward-compat re-export shim.
+Every input is a plain scalar and every output feeds modelcore.OptimizerHparams. Ported from
+our nanochat fork (archived).
 
 Ref: https://arxiv.org/abs/2505.13738 (Power Lines, optimal batch size scaling)
 Ref: https://arxiv.org/abs/2405.13698 (T_epoch weight decay scaling)

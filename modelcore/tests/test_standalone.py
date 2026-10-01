@@ -1,18 +1,15 @@
 """
 Mechanical guard for modelcore's standalone-ness: AST-scans every .py file under modelcore/
-(package and its own tests) and asserts none of them import anything from the host application
-(nanochat, scripts, tasks) or its dev/ tooling. This is what makes `cp -r modelcore /somewhere/else`
-a real, testable claim rather than an aspiration -- see docs/roadmap.md's Stage 8.
-
-A docstring or comment mentioning "nanochat" is fine (and common -- see e.g. modelcore/store.py's
-own module docstring); only actual import statements are checked.
+(package and its own tests) and asserts none of them import a sibling family package or a host's
+scripts. This is what makes `cp -r modelcore /somewhere/else` a real, testable claim rather than
+an aspiration. Only actual import statements are checked, not docstrings or comments.
 
 python -m pytest modelcore/tests/test_standalone.py -v
 """
 import ast
 import os
 
-FORBIDDEN_TOP_LEVEL_PACKAGES = {"nanochat", "scripts", "tasks", "dev", "datacore"}
+FORBIDDEN_TOP_LEVEL_PACKAGES = {"nanochat", "tinylab", "benchcore", "datacore", "llmllab", "scripts", "tasks", "dev"}
 
 MODELCORE_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -46,5 +43,5 @@ def test_no_python_file_under_modelcore_imports_the_host_application():
         if found:
             violations[os.path.relpath(file_path, MODELCORE_ROOT)] = sorted(found)
     assert not violations, (
-        f"modelcore/ must have zero imports from its host application, but found: {violations}"
+        f"modelcore/ must have zero imports from any sibling package or host, but found: {violations}"
     )

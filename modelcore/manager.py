@@ -165,8 +165,7 @@ class ModelManager:
                         muon_momentum: float | None = None, muon_weight_decay: float | None = None) -> None:
         """Mutates every param group's live "lr" (and, for "muon"-kind groups only, "momentum"/
         "weight_decay") for this step -- the values themselves come from wherever the caller wants
-        (see modelcore.optim.schedules for the shapes both nanochat and tinylab use as their
-        default). This is a ModelManager method, not a free function, because it reads
+        (see modelcore.optim.schedules for a default shape). This is a ModelManager method, not a free function, because it reads
         "initial_lr"/"kind" -- create_optimizer's own on-disk param-group layout (see that
         docstring) -- rather than being schedule-shape-agnostic; every arg left None is a no-op
         for that value."""

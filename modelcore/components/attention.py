@@ -146,7 +146,7 @@ class CausalSelfAttention(BaseMixer, FeatureHost):
             # Apply Rotary Embeddings to queries and keys to get relative positional encoding
             q, k = self.rope(q, k, kv_cache)
             q, k = self.norm(q), self.norm(k)  # QK norm
-            q = q * 1.2  # sharper attention (split scale between Q and K), TODO think through better
+            q = q * 1.2  # sharper attention (scale split between Q and K); part of the named architecture
             k = k * 1.2
 
             if kv_bus is not None:

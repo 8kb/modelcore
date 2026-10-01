@@ -12,6 +12,9 @@ sitting on top and producing an already-concrete tree for `modelcore` to build.
 
 See [docs/architecture.md](docs/architecture.md) for the full contract.
 
+Lineage: the family this belongs to descends from [karpathy/nanochat](https://github.com/karpathy/nanochat)
+via our fork `8kb/nanochat` (archived). Conventions and principles: [llmllab/AGENTS.md](../llmllab/AGENTS.md).
+
 ## Quickstart
 
 ```python

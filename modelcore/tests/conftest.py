@@ -1,10 +1,9 @@
 """
 Shared config-tree builders for modelcore's test suite. Builds trees directly with
-ComponentSpec/ModelConfig -- no dependency on nanochat.architectures (that package exists to
-*produce* such a tree from a depth dial or an old checkpoint; modelcore's own tests only ever
-consume an already-materialized one). The first four flavors mirror the four presets
-nanochat.architectures.presets.expand() knows how to derive, so a bug that trips one of these
-generic tests would trip the corresponding preset too.
+ComponentSpec/ModelConfig -- no dependency on a host's preset layer (which exists to *produce* such a
+tree from a depth dial; modelcore's own tests only ever consume an already-materialized one). The
+first four flavors mirror the four presets llmllab/tools/presets.py derives, so a bug that trips one
+of these generic tests would trip the corresponding preset too.
 """
 import pytest
 import torch

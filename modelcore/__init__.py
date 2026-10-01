@@ -2,8 +2,7 @@
 modelcore -- a standalone model subsystem: configs, architectures-as-data, and the machinery to
 create/load/save models and optimizers and compute their stats. Knows nothing about a host
 application's checkpoint naming, tokenizers, or CLI flags; see modelcore/docs/architecture.md for
-the full contract, and (in this repo) nanochat/architectures/ and nanochat/checkpoint_manager.py
-for the layer that adapts a specific application onto it.
+the full contract. A host adapts its own preset/depth-dial layer and checkpoint naming onto it.
 
 ModelManager is the one entrypoint; ModelConfig/ComponentSpec/AdapterSpec, ModelStats,
 ValidationReport, OptimizerHparams, ArtifactStore/FileSystemStore, and KVCache are the value types

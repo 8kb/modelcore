@@ -128,7 +128,7 @@ def build_doc_args(idx, bos_token_id, padding_id=None, max_docs=None):
     Call this OUTSIDE any torch.compile region and pass its result in as plain data:
     `nonzero()`-driven boundary detection inside a compiled model hits torch.compile's recompile
     limit, and a variable-shape cu_seqlens recompiles the graph on every step (25s/iter in
-    upstream's own measurement -- see docs/upstream/LOG.md's "Varlen Attention" entry). Both are
+    upstream karpathy/nanochat's own measurement, recorded in its dev/LOG.md). Both are
     avoided here: doc_ids is a plain cumsum (no data-dependent shape), and cu_seqlens is padded to
     a fixed `max_docs` so its shape is constant regardless of how many documents actually occur.
 
@@ -144,10 +144,10 @@ def build_doc_args(idx, bos_token_id, padding_id=None, max_docs=None):
     into one document rather than one document per pad token -- `is_start` only fires on the first
     BOS of a run.
 
-    padding_id: what a packer used to fill unused row capacity (datacore.packing.BestFitPadPacker;
+    padding_id: what a packer used to fill unused row capacity (a pad-filling packer;
     irrelevant for a never-padded pretraining row). None (default) means "unknown, or the packer
     reused bos_token_id itself" (every dataset prepared before this parameter existed, and
-    BestFitPadPacker's own default) -- in that case a document consisting ENTIRELY of
+    a pad-filling packer's default) -- in that case a document consisting ENTIRELY of
     bos_token_id can only be that pad tail, since a real document always has non-BOS content after
     its own leading BOS, so it's folded into the preceding document instead of counted as its own
     (a row that is 100% padding, with no preceding document to fold into, is left alone). When
