@@ -55,7 +55,7 @@ def _nanogpt_like(n_layer=4, n_head=2, n_kv_head=2, n_embd=64, head_dim=32, voca
 
 def _plain_like(n_layer=4, n_head=2, n_kv_head=2, n_embd=64, head_dim=32, vocab_size=128, sequence_len=32,
                  window=-1, kv_slots=None, mlp=None, norm=None, attn_gate=None):
-    # Llama-style FFN width: 2/3 of 4x, rounded up to a multiple of 256 -- computed here, by the
+    # Llama-style (gated SiLU) FFN width: 2/3 of 4x, rounded up to a multiple of 256 -- computed here, by the
     # test's own "host layer", not by modelcore. "plain" is the same Block class with no features.
     hidden = 256 * ((int(2 * (4 * n_embd) / 3) + 255) // 256)
     mlp = mlp or (lambda: ComponentSpec("gated_mlp", {"activation": "silu", "hidden_dim": hidden}))
@@ -151,13 +151,13 @@ def _nanogpt_lora():
 
 
 def _nanogpt_gated_mlp():
-    """gpt-style blocks with a gated GELU FFN at an unrounded, non-4x width -- proves the mlp slot is
+    """nanogpt-style blocks with a gated GELU FFN at an unrounded, non-4x width -- proves the mlp slot is
     genuinely free, not just a re-spelling of the two hardcoded shapes."""
     return _nanogpt_like(mlp=lambda: ComponentSpec("gated_mlp", {"activation": "gelu", "hidden_dim": 100}))
 
 
 def _plain_layer_norm():
-    """llama-style blocks with a plain (ungated) SiLU FFN of odd width, under a layer_norm shared norm."""
+    """plain-style blocks with a plain (ungated) SiLU FFN of odd width, under a layer_norm shared norm."""
     return _plain_like(mlp=lambda: ComponentSpec("mlp", {"activation": "silu", "hidden_dim": 90}),
                        norm=lambda: ComponentSpec("layer_norm", {"eps": 1e-5}))
 

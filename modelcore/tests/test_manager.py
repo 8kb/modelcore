@@ -72,7 +72,7 @@ def test_num_matmul_params_matches_manual_scan(manager, config):
     assert stats.num_matmul_params == manual
 
 
-def test_llama_flavor_has_no_gpt_residual_topology_extras(manager):
+def test_plain_flavor_has_no_nanogpt_residual_topology_extras(manager):
     """Structural proof of the roadmap's "boring baseline" claim: llama's tree has no value
     embeddings, smear, or per-layer resid/x0 scalars -- unlike gpt, which has all four roles."""
     llama_config = FLAVORS["plain"]()
