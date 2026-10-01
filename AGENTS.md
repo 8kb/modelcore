@@ -23,7 +23,7 @@ contract.
 modelcore/
 ├── manager.py         ModelManager -- the one entrypoint
 ├── model.py            Model -- the one model class, built from a config tree
-├── generate.py         sample_next_token, generate_naive, Decoder (cached prefill+decode)
+├── generate.py         sample_next_token, Decoder (cached prefill+decode)
 ├── evaluate.py           evaluate_bpb -- bits-per-byte (ModelManager.evaluate_bpb is the seam)
 ├── config/
 │   ├── spec.py            ComponentSpec, ModelConfig, AttentionLayerSpec

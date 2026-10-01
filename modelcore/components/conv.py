@@ -11,7 +11,7 @@ import torch
 import torch.nn as nn
 
 from modelcore.catalog import register_component
-from modelcore.components.contracts import BaseMixer
+from modelcore.components.contracts import BaseMixer, is_int
 from modelcore.components.linear import Linear
 from modelcore.config.spec import RecurrentLayerSpec
 
@@ -41,13 +41,9 @@ def causal_depthwise_conv(x, weight, state=None, doc_ids=None):
     return y, xs[:, xs.size(1) - (K - 1):]
 
 
-def _is_int(v):
-    return isinstance(v, int) and not isinstance(v, bool)
-
-
 def _validate_short_conv(params, ctx):
     k = params.get("kernel_size")
-    if not _is_int(k) or k < 1:
+    if not is_int(k) or k < 1:
         return [f"kernel_size must be a positive integer, got {k!r}"]
     return []
 

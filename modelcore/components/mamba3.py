@@ -34,15 +34,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from modelcore.catalog import register_component
-from modelcore.components.contracts import BaseMixer
+from modelcore.components.contracts import BaseMixer, is_int
 from modelcore.components.linear import Linear
 from modelcore.components.rope import apply_rotary_emb
 from modelcore.config.spec import RecurrentLayerSpec
 from modelcore.kernels.ssm import ssd_scan_decay
-
-
-def _is_int(v):
-    return isinstance(v, int) and not isinstance(v, bool)
 
 
 def heavy_tail_activation(x):
@@ -62,17 +58,17 @@ def _validate_mamba3(params, ctx):
     errors = []
     for name in ("d_state", "head_dim", "expand", "n_groups", "chunk_size", "mimo_rank"):
         v = params.get(name)
-        if not _is_int(v) or v < 1:
+        if not is_int(v) or v < 1:
             errors.append(f"{name} must be a positive integer, got {v!r}")
-    if _is_int(params.get("mimo_rank")) and params["mimo_rank"] > 1:
+    if is_int(params.get("mimo_rank")) and params["mimo_rank"] > 1:
         errors.append("mimo_rank > 1 (MIMO) is not implemented yet; use mimo_rank=1 (SISO)")
     if params.get("rope_fraction") not in (0.5, 1.0):
         errors.append(f"rope_fraction must be 0.5 or 1.0, got {params.get('rope_fraction')!r}")
-    elif _is_int(params.get("d_state")) and params["d_state"] >= 1 and num_rope_angles(params["d_state"], params["rope_fraction"]) < 1:
+    elif is_int(params.get("d_state")) and params["d_state"] >= 1 and num_rope_angles(params["d_state"], params["rope_fraction"]) < 1:
         errors.append(f"d_state {params['d_state']} is too small to rotate (need at least one angle)")
     n_embd = ctx.get("n_embd")
     expand, head_dim, n_groups = params.get("expand"), params.get("head_dim"), params.get("n_groups")
-    if all(_is_int(v) and v >= 1 for v in (expand, head_dim, n_groups)) and n_embd is not None:
+    if all(is_int(v) and v >= 1 for v in (expand, head_dim, n_groups)) and n_embd is not None:
         if (expand * n_embd) % head_dim:
             errors.append(f"expand * n_embd ({expand * n_embd}) must be divisible by head_dim ({head_dim})")
         elif ((expand * n_embd) // head_dim) % n_groups:

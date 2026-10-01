@@ -13,7 +13,6 @@ import torch
 
 from modelcore.cache import KVCache
 from modelcore.config.spec import FORMAT, ModelConfig
-from modelcore.config.upgrade import has_v2_types
 from modelcore.config.validate import validate_config as _validate_config
 from modelcore.errors import ValidationReport
 from modelcore.evaluate import evaluate_bpb as _evaluate_bpb
@@ -94,21 +93,14 @@ class ModelManager:
     def config_from_dict(self, d: dict) -> ModelConfig:
         return ModelConfig.from_dict(d)
 
-    def _current(self, config: ModelConfig) -> ModelConfig:
-        """A config a host built from v2 component types (`gpt_block`, `backout`, ...) carried
-        forward to v3 through the dict upgrader -- the same path a v2 file takes. A v3 config is
-        returned as-is. This is what lets a host keep emitting v2 until it chooses to migrate."""
-        return ModelConfig.from_dict(config.to_dict()) if has_v2_types(config) else config
-
     def config_to_dict(self, config: ModelConfig) -> dict:
         return config.to_dict()
 
     def validate_config(self, config: ModelConfig) -> ValidationReport:
-        return _validate_config(self._current(config))
+        return _validate_config(config)
 
     def _require_valid(self, config: ModelConfig) -> ModelConfig:
-        """Returns the config to build from (v2 trees carried forward, see _current)."""
-        config = self._current(config)
+        """Returns the config to build from, raising if it is invalid."""
         report = self.validate_config(config)
         if not report.ok:
             raise ValueError(f"invalid model config:\n{report}")

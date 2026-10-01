@@ -34,36 +34,6 @@ def sample_next_token(logits, rng, temperature=1.0, top_k=None):
         return torch.multinomial(probs, num_samples=1, generator=rng)
 
 
-@torch.inference_mode()
-def generate_naive(model, tokens, max_tokens, temperature=1.0, top_k=None, seed=42):
-    """
-    Naive autoregressive streaming inference (no KV cache): recomputes the full forward pass at
-    every step. Useful as a slow-but-simple reference to check the fast KV-cached Decoder path
-    against. To keep this simple, assumes:
-    - batch size is 1
-    - ids and the yielded tokens are simple Python lists and ints
-
-    Note: sampling here goes through sample_next_token, which (for top_k > 0) draws from the
-    renormalized top-k distribution via torch.multinomial. This gives the same distribution as,
-    but not necessarily the same draw as, masking to -inf and sampling over the full vocab --
-    greedy (temperature=0) is unaffected and remains bit-identical.
-    """
-    assert isinstance(tokens, list)
-    device = model.get_device()
-    rng = None
-    if temperature > 0:
-        rng = torch.Generator(device=device)
-        rng.manual_seed(seed)
-    ids = torch.tensor([tokens], dtype=torch.long, device=device) # add batch dim
-    for _ in range(max_tokens):
-        logits = model.forward(ids) # (B, T, vocab_size)
-        logits = logits[:, -1, :] # (B, vocab_size)
-        next_ids = sample_next_token(logits, rng, temperature, top_k)
-        ids = torch.cat((ids, next_ids), dim=1)
-        token = next_ids.item()
-        yield token
-
-
 class Decoder:
     """Batch-1 prefill of a prompt, replicated into an num_samples-row KV cache, then stepped one
     position at a time -- the generic half of a cached autoregressive decode loop (the other half,

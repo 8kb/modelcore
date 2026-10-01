@@ -14,13 +14,9 @@ import torch
 import torch.nn as nn
 
 from modelcore.catalog import register_component
-from modelcore.components.contracts import BaseFeature
+from modelcore.components.contracts import BaseFeature, is_int
 from modelcore.components.conv import causal_depthwise_conv
 from modelcore.components.linear import Linear
-
-
-def _is_int(v):
-    return isinstance(v, int) and not isinstance(v, bool)
 
 
 # -- output_gate ---------------------------------------------------------------------------------
@@ -37,12 +33,12 @@ def _validate_output_gate(params, ctx):
     if granularity not in GATE_GRANULARITIES:
         errors.append(f"granularity must be one of {list(GATE_GRANULARITIES)}, got {granularity!r}")
     elif granularity == "block":
-        if not _is_int(block_size) or block_size <= 0:
+        if not is_int(block_size) or block_size <= 0:
             errors.append(f"block_size must be a positive integer for granularity 'block', got {block_size!r}")
     elif block_size is not None:
         errors.append(f"block_size must be null for granularity {granularity!r}, got {block_size!r}")
     if in_channels is not None:
-        if not _is_int(in_channels) or in_channels < 1 or (n_embd is not None and in_channels > n_embd):
+        if not is_int(in_channels) or in_channels < 1 or (n_embd is not None and in_channels > n_embd):
             errors.append(f"in_channels must be null or an integer in [1, n_embd={n_embd}], got {in_channels!r}")
     return errors
 
@@ -97,7 +93,7 @@ class OutputGate(BaseFeature):
 def _validate_value_embed(params, ctx):
     gate_channels = params.get("gate_channels")
     n_embd = ctx.get("n_embd")
-    if not _is_int(gate_channels) or gate_channels < 1 or (n_embd is not None and gate_channels > n_embd):
+    if not is_int(gate_channels) or gate_channels < 1 or (n_embd is not None and gate_channels > n_embd):
         return [f"gate_channels must be an integer in [1, n_embd={n_embd}], got {gate_channels!r}"]
     return []
 
@@ -131,8 +127,7 @@ class ValueEmbed(BaseFeature):
     def init_weights(self):
         s = 3**0.5 * self.n_embd**-0.5  # init like c_v: uniform with the same std
         torch.nn.init.uniform_(self.embed.weight, -s, s)
-        if self.runtime.compute_dtype != torch.float16:
-            self.embed.to(dtype=self.runtime.compute_dtype)
+        self.embed.to(dtype=self.runtime.compute_dtype)
         # Gate weights init with small positive values so gates start slightly above neutral
         torch.nn.init.uniform_(self.gate.weight, 0.0, 0.02)
 
@@ -178,7 +173,7 @@ CANON_SITES = ("pre_mixer", "pre_ffn")
 def _validate_canon(params, ctx):
     errors = []
     k = params.get("kernel_size")
-    if not _is_int(k) or k < 1:
+    if not is_int(k) or k < 1:
         errors.append(f"kernel_size must be a positive integer, got {k!r}")
     sites = params.get("sites")
     if not isinstance(sites, list) or not sites or len(set(sites)) != len(sites) or not set(sites) <= set(CANON_SITES):
@@ -242,7 +237,7 @@ class Canon(BaseFeature):
 
 def _validate_backout(params, ctx):
     layer = params.get("backout_layer")
-    if not _is_int(layer) or layer < 0:
+    if not is_int(layer) or layer < 0:
         return [f"backout_layer must be a non-negative integer, got {layer!r}"]
     return []
 

@@ -110,7 +110,7 @@ def test_v3_to_v2_to_v3_is_the_identity_for_every_flavor(config):
     assert upgrade_v2_to_v3(downgrade_v3_to_v2(v3)) == v3
 
 
-def test_upgrade_does_not_mutate_its_input(config):
+def test_upgrade_v2_to_v3_does_not_mutate_its_input(config):
     v2 = downgrade_v3_to_v2(config.to_dict())
     import copy
     before = copy.deepcopy(v2)
@@ -163,34 +163,3 @@ def test_upgrade_rewrites_adapter_targets_and_frozen_fqns():
 def test_remap_v2_name(old, new):
     assert remap_v2_name(old) == new
     assert remap_v2_name(new) == new  # idempotent: v3 names have no rule
-
-
-# -----------------------------------------------------------------------------
-# a host that keeps emitting v2 component types
-
-def _v2_object_config(v3_config):
-    """A ModelConfig whose tree is made of v2 ComponentSpecs -- what a host that has not migrated
-    builds directly."""
-    v2 = downgrade_v3_to_v2(v3_config.to_dict())
-    return ModelConfig(
-        sequence_len=v2["sequence_len"], vocab_size=v2["vocab_size"], n_embd=v2["n_embd"],
-        pad_vocab_size_to=v2["pad_vocab_size_to"], template=v2["template"],
-        shared={k: ComponentSpec.from_dict(s) for k, s in v2["shared"].items()},
-        input=ComponentSpec.from_dict(v2["input"]), body=ComponentSpec.from_dict(v2["body"]),
-        output=ComponentSpec.from_dict(v2["output"]),
-    )
-
-
-@pytest.mark.parametrize("flavor", ["gpt", "gpt_gated_head", "llama", "llama_kvshare_gated_block"])
-def test_a_v2_object_config_builds_the_same_model_as_its_v3_form(manager, flavor):
-    v3 = FLAVORS[flavor]()
-    v2 = _v2_object_config(v3)
-    assert v2.to_dict()["format"] == FORMAT_V2
-    assert manager.validate_config(v2).ok
-    a, b = build(manager, v3, seed=3), build(manager, v2, seed=3)
-    assert b.config.to_dict()["format"] == FORMAT
-    assert {k: v.shape for k, v in a.state_dict().items()} == {k: v.shape for k, v in b.state_dict().items()}
-    idx = torch.randint(0, v3.vocab_size, (2, 8))
-    with torch.no_grad():
-        assert torch.equal(a(idx), b(idx))
-    assert manager.stats(v2).num_params == manager.stats(v3).num_params

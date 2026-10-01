@@ -225,21 +225,28 @@ def test_load_optimizer_returns_none_without_a_saved_shard(manager, config, tmp_
     assert manager.load_optimizer(model, store, rank=0) is None
 
 
-def test_validate_config_reports_every_error_not_just_the_first(manager):
-    bad_blocks = [
-        ComponentSpec("gpt_block", {
-            "layer_idx": 0, "n_head": 3, "n_kv_head": 2, "window": -5, "has_value_embed": False,
-            "resid_lambda_init": 1.0, "x0_lambda_init": 0.0,
-            "mlp": ComponentSpec("mlp", {"activation": "relu2", "hidden_dim": 256}),
-        }),
-    ]
-    config = ModelConfig(
+def _v3_block(i, n_head, n_kv_head, window=-1, kv_slot=None, produces_kv=True, head_dim=None, hidden=256):
+    return ComponentSpec("block", {
+        "layer_idx": i,
+        "mixer": ComponentSpec("attention", {"n_head": n_head, "n_kv_head": n_kv_head, "head_dim": head_dim,
+                                             "window": window, "kv_slot": kv_slot, "produces_kv": produces_kv,
+                                             "features": []}),
+        "ffn": ComponentSpec("gated_mlp", {"activation": "silu", "hidden_dim": hidden}), "features": [],
+    })
+
+
+def _stack_config(blocks, rope_head_dim=32, smear=False):
+    return ModelConfig(
         sequence_len=32, vocab_size=128, n_embd=64, pad_vocab_size_to=64, template="base",
-        shared={"rope": ComponentSpec("rotary", {"head_dim": 32, "over_compute": 10}), "norm": RMS_NORM()},
-        input=ComponentSpec("token_embedding", {"smear": True}),
-        body=ComponentSpec("backout", {"backout_layer": 0, "backout_lambda_init": 0.2, "blocks": bad_blocks}),
+        shared={"rope": ComponentSpec("rotary", {"head_dim": rope_head_dim, "over_compute": 10}), "norm": RMS_NORM()},
+        input=ComponentSpec("token_embedding", {"smear": smear}),
+        body=ComponentSpec("stack", {"blocks": blocks, "features": []}),
         output=ComponentSpec("lm_head", {"softcap": 15}),
     )
+
+
+def test_validate_config_reports_every_error_not_just_the_first(manager):
+    config = _stack_config([_v3_block(0, n_head=3, n_kv_head=2, window=-5)], smear=True)
     report = manager.validate_config(config)
     assert not report.ok
     messages = " ".join(str(e) for e in report.errors)
@@ -275,17 +282,7 @@ def test_create_model_raises_on_invalid_config(manager):
 
 
 def test_kv_sharing_consumer_without_kv_slot_is_reported(manager):
-    blocks = [
-        ComponentSpec("plain_block", {"layer_idx": 0, "n_head": 2, "n_kv_head": 2, "window": -1, "kv_slot": None, "produces_kv": True, "mlp": ComponentSpec("gated_mlp", {"activation": "silu", "hidden_dim": 256})}),
-        ComponentSpec("plain_block", {"layer_idx": 1, "n_head": 2, "n_kv_head": 2, "window": -1, "kv_slot": None, "produces_kv": False, "mlp": ComponentSpec("gated_mlp", {"activation": "silu", "hidden_dim": 256})}),
-    ]
-    config = ModelConfig(
-        sequence_len=32, vocab_size=128, n_embd=64, pad_vocab_size_to=64, template="base",
-        shared={"rope": ComponentSpec("rotary", {"head_dim": 32, "over_compute": 10}), "norm": RMS_NORM()},
-        input=ComponentSpec("token_embedding", {"smear": False}),
-        body=ComponentSpec("stack", {"blocks": blocks}),
-        output=ComponentSpec("lm_head", {"softcap": 15}),
-    )
+    config = _stack_config([_v3_block(0, 2, 2), _v3_block(1, 2, 2, produces_kv=False)])
     report = manager.validate_config(config)
     assert not report.ok
     assert any("explicit kv_slot" in e.message for e in report.errors)
@@ -298,17 +295,7 @@ def test_non_uniform_derived_head_dim_across_blocks_is_reported(manager):
     AssertionError at model-build time, not a clean ValidationReport error). Both n_head values
     here (2, 4) individually divide n_embd=64 cleanly, so this isolates the cross-block
     uniformity check from the per-block divisibility check."""
-    blocks = [
-        ComponentSpec("plain_block", {"layer_idx": 0, "n_head": 2, "n_kv_head": 2, "window": -1, "kv_slot": None, "produces_kv": True, "head_dim": None, "mlp": ComponentSpec("gated_mlp", {"activation": "silu", "hidden_dim": 256})}),
-        ComponentSpec("plain_block", {"layer_idx": 1, "n_head": 4, "n_kv_head": 2, "window": -1, "kv_slot": None, "produces_kv": True, "head_dim": None, "mlp": ComponentSpec("gated_mlp", {"activation": "silu", "hidden_dim": 256})}),
-    ]
-    config = ModelConfig(
-        sequence_len=32, vocab_size=128, n_embd=64, pad_vocab_size_to=64, template="base",
-        shared={"rope": ComponentSpec("rotary", {"head_dim": 32, "over_compute": 10}), "norm": RMS_NORM()},
-        input=ComponentSpec("token_embedding", {"smear": False}),
-        body=ComponentSpec("stack", {"blocks": blocks}),
-        output=ComponentSpec("lm_head", {"softcap": 15}),
-    )
+    config = _stack_config([_v3_block(0, 2, 2), _v3_block(1, 4, 2)])
     report = manager.validate_config(config)
     assert not report.ok
     assert any("non-uniform head_dim" in e.message for e in report.errors)
@@ -320,16 +307,6 @@ def test_differing_n_head_with_matching_explicit_head_dim_is_not_reported(manage
     n_head 2 vs 4 at a fixed head_dim=16 would derive to 32 vs 16 if left to derive (see the
     sibling non-uniform-derived-head_dim test above) -- stating head_dim explicitly on both
     blocks is what makes this configuration valid."""
-    blocks = [
-        ComponentSpec("plain_block", {"layer_idx": 0, "n_head": 2, "n_kv_head": 2, "window": -1, "kv_slot": None, "produces_kv": True, "head_dim": 16, "mlp": ComponentSpec("gated_mlp", {"activation": "silu", "hidden_dim": 256})}),
-        ComponentSpec("plain_block", {"layer_idx": 1, "n_head": 4, "n_kv_head": 2, "window": -1, "kv_slot": None, "produces_kv": True, "head_dim": 16, "mlp": ComponentSpec("gated_mlp", {"activation": "silu", "hidden_dim": 256})}),
-    ]
-    config = ModelConfig(
-        sequence_len=32, vocab_size=128, n_embd=64, pad_vocab_size_to=64, template="base",
-        shared={"rope": ComponentSpec("rotary", {"head_dim": 16, "over_compute": 10}), "norm": RMS_NORM()},
-        input=ComponentSpec("token_embedding", {"smear": False}),
-        body=ComponentSpec("stack", {"blocks": blocks}),
-        output=ComponentSpec("lm_head", {"softcap": 15}),
-    )
+    config = _stack_config([_v3_block(0, 2, 2, head_dim=16), _v3_block(1, 4, 2, head_dim=16)], rope_head_dim=16)
     report = manager.validate_config(config)
     assert report.ok, report.errors

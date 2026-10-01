@@ -216,19 +216,3 @@ def upgrade_to_v3(d: dict) -> dict:
     if fmt == FORMAT_V2:
         d = upgrade_v2_to_v3(d)
     return copy.deepcopy(d)
-
-
-def has_v2_types(config) -> bool:
-    """True if a ModelConfig's tree still uses a v2-only component type (a host that builds v2
-    ComponentSpecs directly). ModelConfig.to_dict stamps such a tree v2 so it upgrades on load."""
-    from modelcore.config.spec import ComponentSpec
-
-    def scan(value):
-        if isinstance(value, ComponentSpec):
-            return (value.type in V2_BLOCK_TYPES or (value.type == "backout" and "blocks" in value.params)
-                    or any(scan(v) for v in value.params.values()))
-        if isinstance(value, list):
-            return any(scan(v) for v in value)
-        return False
-
-    return any(scan(s) for s in (config.input, config.body, config.output, *config.shared.values()))

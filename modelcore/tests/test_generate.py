@@ -1,5 +1,5 @@
 """
-Tests for modelcore/generate.py: sample_next_token, generate_naive, and Decoder (via
+Tests for modelcore/generate.py: sample_next_token and Decoder (via
 ModelManager.new_decoder) -- the generic, tokenizer-agnostic half of autoregressive generation.
 A host's engine layers tool-use/chat-token state on top of the same Decoder; this file proves the
 primitive itself, standalone.
@@ -16,6 +16,19 @@ from modelcore.generate import ToolSpec, collect_batch, collect_batch_multi, gen
 from modelcore.generate import RowState, _advance_row
 
 from modelcore.tests.conftest import FLAVORS, build
+
+
+@torch.inference_mode()
+def generate_naive(model, tokens, max_tokens):
+    """Greedy reference decode with no KV cache: recomputes the full forward pass at every step.
+    Slow but simple, so the cached Decoder path can be checked against it."""
+    ids = torch.tensor([tokens], dtype=torch.long, device=model.get_device())
+    out = []
+    for _ in range(max_tokens):
+        next_ids = sample_next_token(model(ids)[:, -1, :], rng=None, temperature=0.0)
+        ids = torch.cat((ids, next_ids), dim=1)
+        out.append(next_ids.item())
+    return out
 
 
 def test_sample_next_token_greedy_is_argmax():
@@ -41,8 +54,7 @@ def test_decoder_matches_generate_naive_at_temperature_zero(manager):
         prompt = [1, 2, 3, 4]
         max_tokens = 6
 
-        from modelcore.generate import generate_naive
-        naive_tokens = list(generate_naive(model, prompt, max_tokens=max_tokens, temperature=0.0))
+        naive_tokens = generate_naive(model, prompt, max_tokens)
 
         decoder = manager.new_decoder(model, prompt, num_samples=1, max_tokens=max_tokens)
         cached_tokens = []

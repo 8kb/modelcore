@@ -8,6 +8,11 @@ modelcore.model.Model, driven by a config tree).
 import torch.nn as nn
 
 
+def is_int(v):
+    """An int that is not a bool -- what the component validators mean by 'an integer param'."""
+    return isinstance(v, int) and not isinstance(v, bool)
+
+
 class BaseEmbedding(nn.Module):
     """Token ids -> residual-stream activations, ready for the trunk. Owns everything about
     getting from ids to that first activation: the token embedding table, and any input-side

@@ -235,11 +235,8 @@ class ModelConfig:
         assert self.input is not None and self.body is not None and self.output is not None, (
             "ModelConfig.to_dict() requires input/body/output to already be set"
         )
-        from modelcore.config.upgrade import has_v2_types
         d = {
-            # A tree still built from v2 block types (a host that hasn't migrated) is a v2 tree:
-            # stamp it as one so from_dict carries it forward instead of mislabeling it.
-            "format": FORMAT_V2 if has_v2_types(self) else FORMAT, **self.comments,
+            "format": FORMAT, **self.comments,
             "sequence_len": self.sequence_len, "vocab_size": self.vocab_size, "n_embd": self.n_embd,
             "pad_vocab_size_to": self.pad_vocab_size_to, "template": self.template,
             "reference": self.reference,
@@ -296,21 +293,3 @@ class ModelConfig:
             frozen=list(data.get("frozen", [])),
             meta=dict(data.get("meta", {})), tokenizer=data.get("tokenizer"), comments=comments,
         )
-
-
-def resolve_reference_config(resolved_config: "ModelConfig", ref_depth: int, expand) -> "ModelConfig":
-    """The muP scaling-law reference model (modelcore.scaling.derive_training_plan's d_ref) at
-    ref_depth (12), for a config a caller's own depth-dial expander already resolved to
-    `resolved_config`. Moved here from two identical copies (nanochat's
-    architectures/presets.py, tinylab's presets.py) -- both only ever touched
-    ModelConfig.reference, a modelcore-owned field, but need the caller's own preset registry to
-    re-expand it, so `expand` (the caller's own `expand(preset_name, depth, **kwargs)`, e.g.
-    nanochat.architectures.presets.expand) is a required parameter rather than baked in here --
-    this module knows nothing about what presets exist. Every `expand()`-produced config always
-    stamps a `reference` block on its own output (a caller convention, not enforced here), so this
-    works uniformly for any preset."""
-    assert resolved_config.reference is not None, (
-        f"config has no 'reference' block, so its muP scaling-law reference model can't be "
-        f"re-derived automatically at depth {ref_depth}"
-    )
-    return expand(resolved_config.reference["preset"], ref_depth, **resolved_config.reference["kwargs"])

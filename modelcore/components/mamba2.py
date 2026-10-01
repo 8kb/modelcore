@@ -10,26 +10,22 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from modelcore.catalog import register_component
-from modelcore.components.contracts import BaseMixer
+from modelcore.components.contracts import BaseMixer, is_int
 from modelcore.components.conv import causal_depthwise_conv
 from modelcore.components.linear import Linear
 from modelcore.config.spec import RecurrentLayerSpec
 from modelcore.kernels.ssm import ssd_scan, ssd_step
 
 
-def _is_int(v):
-    return isinstance(v, int) and not isinstance(v, bool)
-
-
 def _validate_mamba2(params, ctx):
     errors = []
     for name in ("d_state", "head_dim", "expand", "n_groups", "kernel_size", "chunk_size"):
         v = params.get(name)
-        if not _is_int(v) or v < 1:
+        if not is_int(v) or v < 1:
             errors.append(f"{name} must be a positive integer, got {v!r}")
     n_embd = ctx.get("n_embd")
     expand, head_dim, n_groups = params.get("expand"), params.get("head_dim"), params.get("n_groups")
-    if all(_is_int(v) and v >= 1 for v in (expand, head_dim, n_groups)) and n_embd is not None:
+    if all(is_int(v) and v >= 1 for v in (expand, head_dim, n_groups)) and n_embd is not None:
         if (expand * n_embd) % head_dim:
             errors.append(f"expand * n_embd ({expand * n_embd}) must be divisible by head_dim ({head_dim})")
         elif ((expand * n_embd) // head_dim) % n_groups:

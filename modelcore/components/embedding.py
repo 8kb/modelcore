@@ -30,16 +30,15 @@ class Smear(nn.Module):
 
     def forward(self, x, kv_cache):
         T = x.size(1)
-        if kv_cache is None:
-            # Training / naive generate: full sequence available, use fast slice
+        x_pre_smear = None
+        if kv_cache is not None:
+            # KV cache inference: read prev embedding from cache, store current for next step
+            x_pre_smear = kv_cache.state.get("prev_embedding")
+            kv_cache.state["prev_embedding"] = x[:, -1:, :]
+        else:
             assert T > 1, "Training forward pass should have T > 1"
-            gate = self._gate(x[:, 1:, :self.gate_channels])
-            return torch.cat([x[:, :1], x[:, 1:] + gate * x[:, :-1]], dim=1)
-        # KV cache inference: read prev embedding from cache, store current for next step
-        x_pre_smear = kv_cache.state.get("prev_embedding")
-        kv_cache.state["prev_embedding"] = x[:, -1:, :]
         if T > 1:
-            # Prefill: apply smear to positions 1+, same as training
+            # Training / prefill: the full sequence is available, smear positions 1+
             gate = self._gate(x[:, 1:, :self.gate_channels])
             return torch.cat([x[:, :1], x[:, 1:] + gate * x[:, :-1]], dim=1)
         elif x_pre_smear is not None:
@@ -68,14 +67,12 @@ class TokenEmbedding(BaseEmbedding):
         if self.smear is not None:
             self.smear.init_weights()
         # Cast embeddings to the runtime's compute dtype: optimizer can tolerate reduced-precision
-        # embeddings and it saves memory. Exception: fp16 requires fp32 embeddings because
-        # GradScaler cannot unscale fp16 gradients.
-        if self.runtime.compute_dtype != torch.float16:
-            self.wte.to(dtype=self.runtime.compute_dtype)
+        # embeddings and it saves memory.
+        self.wte.to(dtype=self.runtime.compute_dtype)
 
     def forward(self, idx, kv_cache=None):
         x = self.wte(idx)
-        x = x.to(self.runtime.compute_dtype)  # ensure activations are in compute dtype (no-op usually, but active for fp16)
+        x = x.to(self.runtime.compute_dtype)  # ensure activations are in compute dtype (a no-op once init_weights has cast wte)
         x = self.norm(x)
         if self.smear is not None:
             x = self.smear(x, kv_cache)

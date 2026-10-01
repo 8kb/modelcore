@@ -17,11 +17,11 @@ this document only covers `modelcore` itself.
 modelcore/
 ├── manager.py         ModelManager -- the one entrypoint
 ├── model.py            Model -- the one model class, built from a config tree
-├── generate.py         sample_next_token, generate_naive, Decoder (cached prefill+decode),
+├── generate.py         sample_next_token, Decoder (cached prefill+decode),
 │                        generate_with_tools/ToolSpec/collect_batch (tool-use decode loop)
 ├── scaling.py            derive_training_plan -- muP horizon/batch-size/LR-scale derivation
 ├── config/
-│   ├── spec.py            ComponentSpec, ModelConfig, AttentionLayerSpec, resolve_reference_config
+│   ├── spec.py            ComponentSpec, ModelConfig, AttentionLayerSpec
 │   ├── upgrade.py         upgrade_v1_to_v2 (the only place a default value may be supplied),
 │   │                      upgrade_v2_to_v3, remap_v2_name (v2 module FQN / state key -> v3)
 │   └── validate.py        validate_config() -- structural + component-owned semantic checks
@@ -136,9 +136,7 @@ tree content.
 
 ### Format versions
 
-`to_dict()` always stamps `"format": "modelcore.v3"` (except for a tree still built from v2 component
-types, which it stamps v2 so it upgrades on load -- see "Migrating from v2" below); `from_dict()`
-dispatches on it:
+`to_dict()` always stamps `"format": "modelcore.v3"`; `from_dict()` dispatches on it:
 
 - `"modelcore.v3"` parses as-is.
 - `"modelcore.v2"` goes through `modelcore.config.upgrade.upgrade_v2_to_v3` first.
@@ -391,8 +389,8 @@ writes the upgraded config. `ModelManager.load_model` on a pre-v3 checkpoint rai
 at the converter. **Optimizer state is not converted** — it is positional and v3 reaches parameters
 in a different order — so a converted checkpoint can't resume training.
 
-A host that keeps building v2 `ComponentSpec`s needs no change to build models: `ModelManager`
-carries such a config forward through the dict upgrader (`ModelConfig.to_dict` stamps it v2).
+A `ComponentSpec` tree built in code from v2 component types is not carried forward: `to_dict()`
+stamps v3 and `validate_config` rejects the v2 type names. Only a v2 *dict* (a file) is upgraded.
 Anything that reads tree internals (a block's `params["window"]`, an adapter FQN like
 `body.blocks.0.attn.c_q`) sees the v3 shape after the upgrade.
 
@@ -636,209 +634,10 @@ groups only — `"momentum"`/`"weight_decay"`), which is the same on-disk optimi
 `create_optimizer` builds (see "Every parameter needs a declared role" above) — every value passed
 to it is `None`-by-default (a no-op), so a caller can drive only the parts it wants scheduled.
 
-`modelcore.config.spec.resolve_reference_config(resolved_config, ref_depth, expand)` re-expands a
-config's own `ModelConfig.reference` block (`{"preset": name, "kwargs": {...}}`, stamped by a
-host's own preset expander — see "Only concrete, already-decided values" above) at a different
-depth, e.g. the muP d12 reference `derive_training_plan` needs. It takes the host's own
-`expand(preset_name, depth, **kwargs)` as a parameter rather than importing one — this module knows
-nothing about what presets exist, only that `ModelConfig.reference` is its own field.
-
-## Adding a component, step by step
-
-1. Write the `nn.Module`, obeying whichever contract it fits (`BaseEmbedding`/`BaseBlock`/
-   `BaseUnembedding`/`BaseComposer`) — take explicit constructor kwargs, not a config object, so
-   it doesn't assume any particular tree shape around it.
-2. Declare `PARAM_ROLES` for every parameter it directly owns (or a `param_roles()` override); a
-   `Linear`'s weight needs no declaration.
-3. Register it: `@register_component("my_thing", needs=(...))`, naming exactly the build-context
-   values its constructor needs beyond what's in the spec's own `params`. Add a `validate=`
-   function if it has real constructor-level constraints worth catching before a model is built.
-4. Import the module from `modelcore/components/__init__.py` (or `composers/__init__.py`) so the
-   decorator runs.
-5. If it needs testing at the tree level rather than in isolation, add a flavor to
-   `modelcore/tests/conftest.py`'s `FLAVORS` dict. If it should be reachable from a host
-   application's own depth-dial CLI, add it there too.
-
-## Cross-layer KV sharing
-
-`AttentionLayerSpec.kv_slot` decouples layer index from KV-cache slot:
-`kv_cache_spec()["num_kv_slots"]` (via `modelcore.stats.kv_cache_spec`) can be less than the layer
-count when a layer's `kv_slot` points at an earlier layer's slot. `KVCache`'s constructor kwarg
-and attribute are `num_kv_slots`/`n_slots`, and `get_slot_cache(slot)` returns that slot's
-`(k_cache, v_cache)` view.
-
-A layer built with `produces_kv=False` has no `c_k`/`c_v` at all; at forward time it reads an
-earlier layer's already-RoPE'd/normed/scaled K/V out of a `kv_bus` dict (threaded through one
-composer's forward pass) instead of computing its own — it only projects and rotates its own
-queries (`RotaryEmbedding.apply_to_q`). Passing the producer's own K/V tensors back into
-`flash_attn_with_kvcache` for the consumer (rather than `k=None`) sidesteps a real FA3-vs-SDPA
-divergence in what `k=None` means: with a real cache, `k=None` tells FA3 "nothing new to insert
-this call", so it reads exactly `cache_seqlens` cached tokens — correct for the producer, which
-already wrote the shared slot earlier in the *same* forward pass, but wrong by exactly the new
-token count for a consumer if it relied on `k=None` too.
-
-`kv_cache.advance()` belongs to `Model.forward`, called once after the whole block/composer loop
-runs — not to any one attention layer (a same-layer-count assumption breaks the moment a model has
-fewer KV slots than layers).
-
-## Intra-document masking
-
-`doc_args` (a `modelcore.kernels.flash_attn.DocArgs`, built by `build_doc_args(idx, bos_token_id)`)
-restricts attention to within each packed training row's own document, threaded through
-`Model.forward` → the active composer → `Block.forward` → the mixer (`CausalSelfAttention.forward`)
-alongside `kv_bus`, defaulting to `None` (today's behavior: attention sees the whole row) at every
-hop. Training only — always `None` when `kv_cache is not None`, since one KV-cache row is one
-document at decode time.
-
-`build_doc_args` must be called **outside** any `torch.compile` region and its result passed in as
-plain data: it derives boundaries via `nonzero()`, which recompiles every call inside a compiled
-graph, and `flash_attn_varlen_func`'s `cu_seqlens` is padded to a fixed shape so the compiled
-model's input shapes never change step to step (a real, measured cost otherwise — see
-`docs/upstream/LOG.md`'s "Varlen Attention" entry: 25s/iter from a variable-shape `cu_seqlens`).
-
-That fixed shape is `DEFAULT_MAX_DOCS_PER_ROW * batch_size` documents, **not** the true worst case
-(every token its own document). This is load-bearing, not a style choice: the FA3 varlen kernel
-sizes its backward-pass scratch off `cu_seqlens`'s declared length regardless of how many segments
-are actually non-empty, so defaulting to the worst case (`batch_size * sequence_len`) made a real
-2x H100 run's backward pass try to allocate 28GB of scratch for a declared batch of 131,072
-sequences when the real batch had ~270 documents — an OOM against a model that otherwise fit in
-70GB. `DEFAULT_MAX_DOCS_PER_ROW=64` is sized against ClimbMix's measured ~4.2 documents/row at
-`sequence_len=2048`; `scripts/base_train.py --doc-masking-max-docs-per-row` overrides it for a
-dataset/sequence-length combination that packs more.
-
-Positions are **not** reset per document. RoPE attention scores depend only on the relative offset
-`i − j` between two positions (see `modelcore/components/rope.py`'s note on this), and QK-norm
-commutes with RoPE because a rotation preserves vector norm. With intra-document masking, every
-surviving `(i, j)` pair already lies inside one document, so every relative offset a reset would
-produce is identical to what the row's own absolute positions already give — resetting is a
-bit-identical no-op that would trade a free `cos[:, T0:T0+T]` slice for a per-token gather, on
-every layer, for nothing.
-
-`Smear` (`modelcore/components/embedding.py`) is a known, deliberate gap: it blends each token's
-embedding with its predecessor's across the whole row, upstream of q/k/v, where no attention mask
-can reach — one token of leak per document boundary, in the `gpt` preset only (`llama*` presets
-disable it).
-
-## FP8 precision
-
-`modelcore/precision/fp8.py` is a from-scratch, ~150-line tensorwise-dynamic-scaling FP8 training
-path (drop-in for torchao's `Float8Linear`/`convert_to_float8_training` API, without the ~2000
-lines torchao needs for rowwise scaling, FSDP float8 all-gather, and tensor-subclass dispatch —
-see the module docstring for the full design rationale). `Float8Linear` subclasses
-`modelcore.components.linear.Linear`, not a bare `nn.Linear` — this is what keeps an fp8-converted
-weight resolving to role `"matrix"` under `collect_param_roles` and counted by
-`modelcore.stats.num_matmul_params`; a subclass of the wrong base class fails both silently.
-
-`ModelManager.enable_fp8(model, *, recipe="tensorwise", align=16, min_dim=128)` walks the tree
-converting every eligible `Linear` (dims divisible by `align`, at least `min_dim` — below that,
-quantization overhead dominates the matmul it's supposed to speed up) and returns an `Fp8Report`
-(`num_linear`, `num_converted`, `num_skipped`). `ModelManager.fp8_disabled(model)` is a context
-manager that temporarily swaps every `Float8Linear` back to a plain `Linear` sharing the same
-weight/bias (for full-precision eval), restoring on exit; it's a no-op if the tree has no fp8
-modules. Both are safe to call at any point in a model's lifecycle — an optimizer built after
-`enable_fp8` sees ordinary `"matrix"`-role parameters, same as before conversion.
-
-## Adapters in the config tree
-
-`modelcore/peft/` adds LoRA and DoRA (weight-decomposed LoRA, https://arxiv.org/abs/2402.09353) as
-low-rank adapters — but expressed as **config**, not a post-build transform like FP8 above. The
-difference matters: `enable_fp8` is a one-shot call over an already-built model, invisible to
-`config.to_dict()`, so an fp8 model's config doesn't know fp8 happened. An adapter done that way
-would be un-editable — you couldn't hand-edit a checkpoint's `meta.json` to disable one and
-reload. So `ModelConfig` carries two more fields, `adapters: list[AdapterSpec]` and `frozen:
-list[str]`, applied automatically by `Model.__init__` over the already-built tree, the same
-"materialized DSL" `ComponentSpec` already is for architecture (see "The materialized config
-tree" above) — a `list[AdapterSpec]` is just as much a tree of already-concrete values as a
-`ComponentSpec` tree, and follows the same rule: no derivation, only concrete FQNs and params. The
-family's move toward config-first "DSL"s for data prep and training plans is headed the same
-direction; adapters are the first instance of it outside architecture itself.
-
-```python
-@dataclass
-class AdapterSpec:
-    target: str            # module FQN relative to the Model root, e.g. "body.blocks.3.mixer.c_q"
-    name: str               # stable handle: keys its state_dict entries, and what a caller
-                            # enables/disables/re-adds by
-    type: str               # a modelcore.peft.registry name -- "lora" | "dora" today
-    params: dict            # that delta class's own constructor kwargs (r, alpha, dropout, ...)
-    enabled: bool = True
-```
-
-Both `adapters` and `frozen` are omitted from `to_dict()` when empty, so every config written
-before this feature existed still serializes byte-identically.
-
-**`AdapterLinear`** (`modelcore/peft/apply.py`) is the one structural piece, and it subclasses
-`Linear` for the exact reason `Float8Linear` does — it's the marker `collect_param_roles`/
-`num_matmul_params` key off. It owns zero or more named **deltas** in an `nn.ModuleDict`, plus a
-plain Python `enabled: dict[str, bool]` — deliberately *not* a buffer or Parameter, so toggling it
-touches nothing on disk:
-
-```python
-def forward(self, x):
-    base_weight = self.weight.to(dtype=x.dtype)
-    y = F.linear(x, base_weight)
-    for name, delta in self.deltas.items():
-        if self.enabled.get(name, True):
-            y = delta(x, y, base_weight)
-    return y
-```
-
-A delta's `forward(x, y, base_weight) -> y'` takes the running output so it can either add to it
-(`LoRADelta`: `y + (alpha/r) * B(A(x))`, B zero-initialized so a fresh adapter is an exact
-forward no-op) or replace it with a fresh weight-space computation (`DoRADelta`, which needs
-`base_weight` to reconstruct `magnitude * normalize(W0 + BA)` and so ignores whatever `y` it was
-passed — stacking a weight-space delta after another delta on the same target silently drops the
-earlier one's contribution; avoid that combination). `A`/`B` are modelcore `Linear`s too, not bare
-`Parameter`s, so they get the compute-dtype cast and FLOPs accounting for free; their `PARAM_ROLES`
-override sends them to a new `"adapter"` role (`"adapter_scalar"` for DoRA's `magnitude`) instead
-of falling through to `Linear`'s default `"matrix"` — a rank-`r` factor is the wrong shape for
-Muon's Newton-Schulz step, so both new roles route through AdamW, appended at the end of
-`ModelManager.create_optimizer`'s policy dict (order is the on-disk param-group layout, same rule
-as every other role).
-
-`Model.__init__` applies `config.frozen` *before* `config.adapters`, and the order is load-bearing:
-`apply_adapters` shares (not copies) a target's existing `weight` `Parameter` object into the new
-`AdapterLinear`, so a base weight already frozen stays frozen after conversion, while every delta's
-own params (freshly constructed) default to trainable. Reversing the order would instead recurse
-`requires_grad_(False)` into the delta submodules too. An adapter's own on/off state doesn't need a
-separate frozen-FQN path at all: `AdapterLinear.set_enabled` toggles `requires_grad_` on the whole
-delta in lockstep with `enabled`, since a disabled delta never enters the forward computation and
-would otherwise leave a permanently-`None`-grad parameter sitting in an optimizer group —
-`MuonAdamW.step()` dereferences `p.grad` unconditionally and crashes on that, doesn't silently
-no-op.
-
-**Loading is reconciling, not strict, once adapters exist.** `ModelManager.load_model`'s
-`strict=True` is exactly what makes "hand-edit a config, reload" impossible on its own — a
-`load_state_dict` call would reject any key under some `AdapterLinear`'s `deltas` (the
-`".deltas."` substring is the load-bearing convention both sides share) that the checkpoint and
-the config disagree about. So when `config.adapters` is non-empty, `load_model` does
-`load_state_dict(state, strict=False, ...)` and requires every `missing_keys`/`unexpected_keys`
-entry to be an adapter key — a newly hand-added adapter is left at its (already-computed) init
-value, a removed one is silently dropped, anything else still raises exactly as before. A config
-with *no* adapters takes the original `strict=True` path, byte-identical to before this existed.
-
-Two more manager methods round this out: `merge_adapters(model)` folds every enabled delta into
-its target's base weight and swaps back to a plain `Linear` (for serving/eval throughput, without
-touching `model.config` — a fresh unmerged model can still be built from it), and
-`adapters_disabled(model)` is a context manager (mirroring `fp8_disabled`) that temporarily
-disables every adapter, for an eval of the base model underneath its adapters.
-
-IA3 and prefix-tuning fit the same seam without a design change: a new delta class plus one
-`@register_adapter(name)` decorator, and (for prefix-tuning) an `AdapterSpec.target` naming a
-whole module rather than a `Linear` — the FQN-keyed spec already expresses that. QLoRA (a
-quantized frozen base) would live in `modelcore/precision/`, the module boundary that already
-exists "so a future precision scheme has somewhere to live without `ModelManager` growing a case
-per scheme" — composing with a delta the same way the FP8 guard above makes FP8 and LoRA coexist
-rather than clobber.
-
-## Generation primitives
-
 `modelcore/generate.py` holds the tokenizer-agnostic half of autoregressive generation:
 
 - `sample_next_token(logits, rng, temperature=1.0, top_k=None)` — greedy at `temperature=0`,
   multinomial (optionally top-k-renormalized) otherwise.
-- `generate_naive(model, tokens, max_tokens, ...)` — a slow, no-KV-cache reference implementation
-  (recomputes the full forward pass every step); useful for checking a fast cached path against.
 - `Decoder` — a batch-1 prefill of a prompt, replicated into an `num_samples`-row `KVCache`, then
   stepped one position at a time (`decoder.step(token_column) -> logits`). Reached via
   `ModelManager.new_decoder(model, tokens, *, num_samples=1, max_tokens=None, device=None)`.
@@ -923,7 +722,7 @@ python -m pytest modelcore/tests -v
 
 runs the whole suite, including `test_standalone.py` (an AST scan asserting zero imports from a
 host application anywhere under `modelcore/`) and `test_precision.py`/`test_generate.py` (fp8
-role/accounting correctness, and `Decoder` vs `generate_naive` agreement). The real proof of
+role/accounting correctness, and `Decoder` vs a naive no-cache decode agreement). The real proof of
 standalone-ness, occasionally worth re-running by hand from this repo's root:
 
 ```bash
