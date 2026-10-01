@@ -7,9 +7,18 @@ from modelcore.components.contracts import BaseUnembedding
 from modelcore.components.linear import Linear
 
 
-@register_component("lm_head", needs=("n_embd", "vocab_size", "padded_vocab_size", "norm"))
+def _validate_lm_head(params, ctx):
+    softcap = params.get("softcap")
+    if softcap is None:
+        return []
+    if isinstance(softcap, bool) or not isinstance(softcap, (int, float)) or softcap <= 0:
+        return [f"softcap must be null (no softcap) or a positive number, got {softcap!r}"]
+    return []
+
+
+@register_component("lm_head", needs=("n_embd", "vocab_size", "padded_vocab_size", "norm"), validate=_validate_lm_head)
 class LMHead(BaseUnembedding):
-    """Final norm() + output projection + vocab crop + tanh softcap, and the loss when targets
+    """Final norm() + output projection + vocab crop + tanh softcap (softcap=None disables it), and the loss when targets
     are given. Residual-stream activations -> logits.
 
     weight= optionally ties the projection to an existing Parameter (e.g. an embedding's wte
@@ -43,7 +52,8 @@ class LMHead(BaseUnembedding):
         logits = self.lm_head(x)  # (B, T, padded_vocab_size) <- very big tensor, large amount of memory
         logits = logits[..., :self.vocab_size]  # slice to remove padding
         logits = logits.float()  # switch to fp32 for logit softcap and loss computation
-        logits = self.softcap * torch.tanh(logits / self.softcap)  # smoothly cap logits to [-softcap, softcap]
+        if self.softcap is not None:
+            logits = self.softcap * torch.tanh(logits / self.softcap)  # smoothly cap logits to [-softcap, softcap]
         if targets is not None:
             # training: given the targets, compute and return the loss
             return F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1, reduction=loss_reduction)

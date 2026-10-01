@@ -714,6 +714,16 @@ weight to the input's dtype (`x.dtype`, which is `Runtime.compute_dtype` after t
 `modelcore.stats.num_matmul_params` sees it — it's the structural marker that accounting scans
 for, and the same marker `modelcore.precision.fp8` swaps in place of.
 
+## Constants that are part of the named architecture
+
+Some numbers are not config keys on purpose (YAGNI: a constant becomes a key only when an
+experiment needs it, and changing one is a new architecture, not a tuning knob): the smear gate
+width (24 channels), the QK scale (1.2 on each of Q and K, after QK-norm), the RoPE base (100000),
+the init stds (embedding 0.8, unembedding 0.001, value-embed/gate inits) and the zero-init of lambdas.
+`softcap` is the exception: a `lm_head` takes `null` for "no softcap" (validated: `null` or a
+positive number). `DEFAULT_MAX_DOCS_PER_ROW` (flash-attention varlen scratch sizing) is tuned to
+the datasets it was measured on; pass `max_docs` to `build_doc_args` for a denser packing.
+
 ## Verifying a change is behavior-preserving
 
 `modelcore`'s own net is its parametrized suite (`modelcore/tests/test_manager.py`, run over every

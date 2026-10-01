@@ -320,3 +320,16 @@ def test_output_gate_adds_exact_matmul_params():
     base = ModelManager().stats(_plain_like())
     gated = ModelManager().stats(_plain_like(attn_gate=_gate("block", 8, in_channels=16)))
     assert gated.num_matmul_params - base.num_matmul_params == 4 * (2 * 4 * 16)
+
+
+def test_lm_head_softcap_null_disables_it_and_a_bad_value_is_rejected():
+    manager = ModelManager()
+    config = _plain_like()
+    config.output.params["softcap"] = None
+    assert manager.validate_config(config).ok
+    model = build(manager, config)
+    logits = model(torch.randint(0, config.vocab_size, (1, 8)))
+    assert logits.abs().max() > 0  # builds and runs without the tanh
+    for bad in (0, -3, "15", True):
+        config.output.params["softcap"] = bad
+        assert any("softcap" in e.message for e in manager.validate_config(config).errors), bad
