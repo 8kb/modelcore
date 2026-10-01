@@ -96,6 +96,19 @@ optimizer methods — no `layer_specs()`, `kv_cache_spec()`, `estimate_flops()`,
 `ModelManager.stats()`/`create_optimizer()` do from the outside. This is deliberate: a model
 object answers "what do I compute", not "how much does that cost" or "how do I optimize myself".
 
+## The public surface
+
+`modelcore.__all__` is the public surface: `ModelManager` and its value types (`ModelConfig`,
+`ComponentSpec`, `ModelStats`, `OptimizerHparams`, `KVCache`, `ArtifactStore`/`FileSystemStore`,
+`ValidationReport`), the generation primitives (`Decoder`, `generate_with_tools`, `collect_batch`),
+the runtime helpers (`DEFAULT_RUNTIME`, `compute_init`, `peak_flops`, ...), `derive_training_plan`, the
+step schedules (`lr_multiplier`, `muon_momentum`), `build_doc_args` (call it outside any
+`torch.compile` region) and `find_adapters`. Three modules are also public by path: `config.upgrade`
+(the dict upgraders), `convert` (the checkpoint converter) and `components.linear.Linear` (the
+structural marker for "matmul params"). Everything else -- the catalog, components, composers, roles,
+kernels, peft internals -- is internal and may change without notice. There are no facade classes:
+a host imports these names directly.
+
 ## The materialized config tree
 
 There is exactly one config shape `modelcore` understands (`modelcore/config/spec.py`):
