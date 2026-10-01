@@ -59,7 +59,7 @@ class LoRADelta(nn.Module):
     @torch.no_grad()
     def init_adapter_weights(self, base_weight=None):
         # Same Uniform-for-matched-Normal-std convention as every other modelcore init (see e.g.
-        # CausalSelfAttention.init_weights) -- B stays zero regardless of A's init.
+        # Attention.init_weights) -- B stays zero regardless of A's init.
         s = 3**0.5 * self.lora_A.in_features**-0.5
         nn.init.uniform_(self.lora_A.weight, -s, s)
         nn.init.zeros_(self.lora_B.weight)

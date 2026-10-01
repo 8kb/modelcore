@@ -125,7 +125,7 @@ def test_upgrade_to_v3_is_idempotent_and_reaches_v3_from_any_format(config):
 
 
 def test_a_gpt_block_becomes_a_block_with_a_lambdas_feature_and_a_value_embed_on_its_mixer():
-    d = downgrade_v3_to_v2(FLAVORS["gpt_gated_head"]().to_dict())
+    d = downgrade_v3_to_v2(FLAVORS["nanogpt_gated_head"]().to_dict())
     block = d["body"]["blocks"][0]
     assert block["#type"] == "gated_gpt_block" and d["body"]["#type"] == "backout"
     up = upgrade_v2_to_v3(d)
@@ -140,7 +140,7 @@ def test_a_gpt_block_becomes_a_block_with_a_lambdas_feature_and_a_value_embed_on
 
 
 def test_upgrade_rewrites_adapter_targets_and_frozen_fqns():
-    v3 = FLAVORS["gpt_lora"]().to_dict()
+    v3 = FLAVORS["nanogpt_lora"]().to_dict()
     v2 = downgrade_v3_to_v2(v3)
     assert v2["adapters"][0]["target"] == "body.blocks.0.attn.c_q"
     assert upgrade_v2_to_v3(v2)["adapters"] == v3["adapters"]

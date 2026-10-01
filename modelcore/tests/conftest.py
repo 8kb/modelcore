@@ -20,11 +20,11 @@ def _mixer(n_head, n_kv_head, head_dim, window, kv_slot=None, produces_kv=True, 
                                        "features": [f() for f in features]})
 
 
-def _gpt_like(n_layer=4, n_head=2, n_kv_head=2, n_embd=64, head_dim=32, vocab_size=128, sequence_len=32, window=-1,
+def _nanogpt_like(n_layer=4, n_head=2, n_kv_head=2, n_embd=64, head_dim=32, vocab_size=128, sequence_len=32, window=-1,
               mlp=None, norm=None, attn_gate=None):
     # A v3 tree states everything: an mlp per block, a shared norm, a template, no constructor
     # defaults. `mlp`/`norm` are overridable so a flavor can exercise a non-default choice.
-    # "gpt" is a feature set on the one Block class: resid_lambdas on the block, value_embed (on
+    # "nanogpt" is a feature set on the one Block class: resid_lambdas on the block, value_embed (on
     # alternating layers) on the attention, backout on the stack.
     mlp = mlp or (lambda: ComponentSpec("mlp", {"activation": "relu2", "hidden_dim": 4 * n_embd}))
     blocks = []
@@ -56,7 +56,7 @@ def _gpt_like(n_layer=4, n_head=2, n_kv_head=2, n_embd=64, head_dim=32, vocab_si
 def _plain_like(n_layer=4, n_head=2, n_kv_head=2, n_embd=64, head_dim=32, vocab_size=128, sequence_len=32,
                  window=-1, kv_slots=None, mlp=None, norm=None, attn_gate=None):
     # Llama-style FFN width: 2/3 of 4x, rounded up to a multiple of 256 -- computed here, by the
-    # test's own "host layer", not by modelcore. "llama" is the same Block class with no features.
+    # test's own "host layer", not by modelcore. "plain" is the same Block class with no features.
     hidden = 256 * ((int(2 * (4 * n_embd) / 3) + 255) // 256)
     mlp = mlp or (lambda: ComponentSpec("gated_mlp", {"activation": "silu", "hidden_dim": hidden}))
     blocks = []
@@ -135,13 +135,13 @@ def _mixed_like(kinds, n_head=2, n_embd=64, head_dim=32, vocab_size=128, sequenc
     )
 
 
-def _gpt_lora():
-    """_gpt_like() with the whole body frozen and a LoRA adapter on two attention projections in
+def _nanogpt_lora():
+    """_nanogpt_like() with the whole body frozen and a LoRA adapter on two attention projections in
     layer 0 -- runs apply_adapters/the freeze-then-apply ordering, the "adapter" optimizer role,
     and the reconciling load_model path through every generic test in test_manager.py. Embedding/
     unembedding/shared stay trainable, so the frozen-vs-trainable split is meaningfully exercised
     rather than degenerating to "everything is frozen" or "nothing is"."""
-    config = _gpt_like()
+    config = _nanogpt_like()
     config.frozen = ["body"]
     config.adapters = [
         AdapterSpec(target="body.blocks.0.mixer.c_q", name="t0", type="lora", params={"r": 4, "alpha": 8}),
@@ -150,24 +150,24 @@ def _gpt_lora():
     return config
 
 
-def _gpt_gated_mlp():
+def _nanogpt_gated_mlp():
     """gpt-style blocks with a gated GELU FFN at an unrounded, non-4x width -- proves the mlp slot is
     genuinely free, not just a re-spelling of the two hardcoded shapes."""
-    return _gpt_like(mlp=lambda: ComponentSpec("gated_mlp", {"activation": "gelu", "hidden_dim": 100}))
+    return _nanogpt_like(mlp=lambda: ComponentSpec("gated_mlp", {"activation": "gelu", "hidden_dim": 100}))
 
 
-def _llama_layer_norm():
+def _plain_layer_norm():
     """llama-style blocks with a plain (ungated) SiLU FFN of odd width, under a layer_norm shared norm."""
     return _plain_like(mlp=lambda: ComponentSpec("mlp", {"activation": "silu", "hidden_dim": 90}),
                        norm=lambda: ComponentSpec("layer_norm", {"eps": 1e-5}))
 
 
-def _gpt_decoupled_head_dim():
+def _nanogpt_decoupled_head_dim():
     """head_dim stated explicitly and NOT equal to n_embd // n_head: n_head=8 * head_dim=16 = 128,
     double n_embd=64. Proves attention width is genuinely decoupled from n_embd (c_q/c_k/c_v/c_proj
     size off n_head*head_dim, not off n_embd) -- exercised through every generic parametrized test
     (forward, backward, stats, save/load, optimizer groups, kv_cache_spec) for free."""
-    return _gpt_like(n_head=8, n_kv_head=8, head_dim=16)
+    return _nanogpt_like(n_head=8, n_kv_head=8, head_dim=16)
 
 
 def _gate(granularity, block_size=None, in_channels=None):
@@ -176,17 +176,17 @@ def _gate(granularity, block_size=None, in_channels=None):
 
 
 FLAVORS = {
-    "gpt": lambda: _gpt_like(),
-    "llama": lambda: _plain_like(),
-    "llama_kvshare": lambda: _plain_like(kv_slots=[0, 1, 1, 1]),
-    "llama_kvshare_win": lambda: _plain_like(window=8, kv_slots=[0, 1, 1, 1]),
-    "gpt_lora": _gpt_lora,
-    "gpt_gated_mlp": _gpt_gated_mlp,
-    "llama_layer_norm": _llama_layer_norm,
-    "gpt_decoupled_head_dim": _gpt_decoupled_head_dim,
-    "gpt_gated_head": lambda: _gpt_like(attn_gate=_gate("head")),
-    "llama_gated_element": lambda: _plain_like(attn_gate=_gate("element", in_channels=16)),
-    "llama_kvshare_gated_block": lambda: _plain_like(kv_slots=[0, 1, 1, 1], attn_gate=_gate("block", 8)),
+    "nanogpt": lambda: _nanogpt_like(),
+    "plain": lambda: _plain_like(),
+    "plain_kvshare": lambda: _plain_like(kv_slots=[0, 1, 1, 1]),
+    "plain_kvshare_win": lambda: _plain_like(window=8, kv_slots=[0, 1, 1, 1]),
+    "nanogpt_lora": _nanogpt_lora,
+    "nanogpt_gated_mlp": _nanogpt_gated_mlp,
+    "plain_layer_norm": _plain_layer_norm,
+    "nanogpt_decoupled_head_dim": _nanogpt_decoupled_head_dim,
+    "nanogpt_gated_head": lambda: _nanogpt_like(attn_gate=_gate("head")),
+    "plain_gated_element": lambda: _plain_like(attn_gate=_gate("element", in_channels=16)),
+    "plain_kvshare_gated_block": lambda: _plain_like(kv_slots=[0, 1, 1, 1], attn_gate=_gate("block", 8)),
     "conv_only": lambda: _mixed_like(["conv"] * 4),
     "hybrid_attn_conv": lambda: _mixed_like(["attn", "conv", "attn", "conv"]),
     "hybrid_win_canon": lambda: _mixed_like(["conv", "attn", "conv", "attn"], window=8, canon=_canon()),
@@ -196,7 +196,7 @@ FLAVORS = {
     "mamba3_only": lambda: _mixed_like(["mamba3"] * 3),
     "mamba3_groups_full_rope": lambda: _mixed_like(["mamba3"] * 2, mamba3=dict(n_groups=2, rope_fraction=1.0, chunk_size=4, d_state=8)),
     "hybrid_mamba3_attn": lambda: _mixed_like(["attn", "mamba3", "attn", "mamba3"], window=8),
-    "llama_canon_mixer_only": lambda: _mixed_like(["attn"] * 3, canon=_canon(3, ("pre_mixer",))),
+    "plain_canon_mixer_only": lambda: _mixed_like(["attn"] * 3, canon=_canon(3, ("pre_mixer",))),
 }
 
 

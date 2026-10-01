@@ -44,7 +44,7 @@ def test_convert_then_collect_param_roles_succeeds(manager):
 
 
 def test_convert_then_create_optimizer_succeeds(manager):
-    config = FLAVORS["gpt"]()
+    config = FLAVORS["nanogpt"]()
     model = build(manager, config)
     _convert_all(model)
     optimizer = manager.create_optimizer(model)  # must not raise
@@ -53,7 +53,7 @@ def test_convert_then_create_optimizer_succeeds(manager):
 
 
 def test_enable_fp8_reports_counts(manager):
-    config = FLAVORS["gpt"]()
+    config = FLAVORS["nanogpt"]()
     model = build(manager, config)
     num_linear_before = sum(1 for m in model.modules() if isinstance(m, Linear))
     report = manager.enable_fp8(model, align=1, min_dim=1)  # permissive so tiny dims convert
@@ -64,7 +64,7 @@ def test_enable_fp8_reports_counts(manager):
 
 
 def test_fp8_disabled_round_trips_the_tree(manager):
-    config = FLAVORS["gpt"]()
+    config = FLAVORS["nanogpt"]()
     model = build(manager, config)
     manager.enable_fp8(model, align=1, min_dim=1)
     num_fp8 = sum(1 for m in model.modules() if isinstance(m, Float8Linear))
@@ -82,7 +82,7 @@ def test_fp8_disabled_round_trips_the_tree(manager):
 
 
 def test_fp8_disabled_is_a_noop_with_no_fp8_modules(manager):
-    config = FLAVORS["llama"]()
+    config = FLAVORS["plain"]()
     model = build(manager, config)
     with manager.fp8_disabled(model):
         idx = torch.randint(0, config.vocab_size, (2, 8))
@@ -93,7 +93,7 @@ def test_fp8_disabled_is_a_noop_with_no_fp8_modules(manager):
 def test_enable_fp8_default_filter_skips_small_dims(manager):
     """The hardware-aligned default (align=16, min_dim=128) should skip these tiny test dims
     entirely rather than crash -- num_skipped == num_linear."""
-    config = FLAVORS["gpt"]()
+    config = FLAVORS["nanogpt"]()
     model = build(manager, config)
     report = manager.enable_fp8(model)  # default align/min_dim
     assert report.num_converted == 0

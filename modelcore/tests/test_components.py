@@ -243,7 +243,7 @@ import pytest
 
 from modelcore import ComponentSpec
 from modelcore.config.validate import validate_config
-from modelcore.tests.conftest import _gate, _gpt_like, _plain_like, build
+from modelcore.tests.conftest import _gate, _nanogpt_like, _plain_like, build
 from modelcore import ModelManager
 from types import SimpleNamespace
 
@@ -305,12 +305,12 @@ def _errors(config):
     (_gate("head", in_channels=65), "in_channels"),
 ])
 def test_output_gate_validation_errors(gate, needle):
-    assert any(needle in m for m in _errors(_gpt_like(attn_gate=gate)))
+    assert any(needle in m for m in _errors(_nanogpt_like(attn_gate=gate)))
 
 
 def test_output_gate_role_is_matrix():
     from modelcore.roles import collect_param_roles
-    model = build(ModelManager(), _gpt_like(attn_gate=_gate("head")))
+    model = build(ModelManager(), _nanogpt_like(attn_gate=_gate("head")))
     gate_ids = {id(p) for n, p in model.named_parameters() if "features.output_gate.proj." in n}
     assert gate_ids
     assert gate_ids <= {id(p) for p in collect_param_roles(model)["matrix"]}

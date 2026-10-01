@@ -376,7 +376,7 @@ class TestSDPAOnly:
         n_kv_slots = 1
 
         cache = KVCache(
-            batch_size=B, num_heads=H, seq_len=T_max, head_dim=D,
+            batch_size=B, n_kv_head=H, seq_len=T_max, head_dim=D,
             num_kv_slots=n_kv_slots, device=self.DEVICE, dtype=self.DTYPE
         )
         k_cache, v_cache = cache.get_slot_cache(0)

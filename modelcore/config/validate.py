@@ -131,9 +131,9 @@ def _validate_kv_layout(body, n_embd, errors):
     would otherwise raise an AssertionError for at model-build time.
 
     What the KV cache actually requires uniform is head_dim (and n_kv_head), not n_head -- an
-    explicit head_dim decouples the two (see CausalSelfAttention), so blocks may disagree on
+    explicit head_dim decouples the two (see Attention), so blocks may disagree on
     n_head as long as they agree on head_dim. A block with head_dim=null derives it from
-    n_embd // n_head for this check the same way CausalSelfAttention would; a block whose n_head
+    n_embd // n_head for this check the same way Attention would; a block whose n_head
     doesn't divide n_embd is left out of the head_dims set here (n_embd-divisibility is
     _validate_attention_shape's job, already reported there)."""
     blocks = _collect_block_specs(body, "body")
@@ -175,7 +175,7 @@ def _validate_adapters(config, errors):
 
     Unlike every other check in this module, this one needs a real (meta-device -- still no
     tensor ever allocated) Model: an adapter target is a module attribute path inside a
-    component's own Python class (e.g. CausalSelfAttention.c_q), not something expressible from
+    component's own Python class (e.g. Attention.c_q), not something expressible from
     ComponentSpec params alone, so there's no way to check it without building the tree it refers
     into. Skipped entirely if the base tree already has errors (building it would likely crash
     outright, e.g. a hard `assert n_embd % n_head == 0` inside a component's own __init__ that

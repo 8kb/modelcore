@@ -18,7 +18,7 @@ from modelcore.kernels.flash_attn import build_doc_args
 from modelcore.roles import collect_param_roles
 from modelcore.tests.conftest import FLAVORS, _canon, _mixed_like, _plain_like, build
 
-CONV_FLAVORS = ["conv_only", "hybrid_attn_conv", "hybrid_win_canon", "llama_canon_mixer_only",
+CONV_FLAVORS = ["conv_only", "hybrid_attn_conv", "hybrid_win_canon", "plain_canon_mixer_only",
                 "mamba2_only", "mamba2_groups", "hybrid_mamba2_attn",
                 "mamba3_only", "mamba3_groups_full_rope", "hybrid_mamba3_attn"]
 BOS = 1
@@ -254,7 +254,7 @@ def test_state_is_constant_per_row_and_counted_from_mixers_and_features(manager)
     assert manager.stats(FLAVORS["hybrid_attn_conv"]()).state_elems_per_row == 2 * (K - 1) * D  # 2 conv layers
     # hybrid_win_canon: 2 conv mixers + canon (two sites) on all 4 blocks
     assert manager.stats(FLAVORS["hybrid_win_canon"]()).state_elems_per_row == 2 * (K - 1) * D + 4 * 2 * (K - 1) * D
-    assert manager.stats(FLAVORS["gpt"]()).state_elems_per_row == 0
+    assert manager.stats(FLAVORS["nanogpt"]()).state_elems_per_row == 0
 
 
 def test_conv_flops_are_counted_beyond_the_matmuls(manager):
@@ -265,7 +265,7 @@ def test_conv_flops_are_counted_beyond_the_matmuls(manager):
     assert stats.flops_per_token == 6 * stats.num_matmul_params + 3 * 4 * per_layer
     assert stats.decode_flops(10) == stats.decode_flops(10_000) == 2 * stats.num_matmul_params + 4 * per_layer
     assert stats.prefill_flops(7) == 7 * stats.decode_flops(1)
-    canon = manager.stats(FLAVORS["llama_canon_mixer_only"]())
+    canon = manager.stats(FLAVORS["plain_canon_mixer_only"]())
     assert canon.extra_fwd_flops_per_token == 3 * (2 * 3 + 1) * D  # one site, three blocks
 
 

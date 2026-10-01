@@ -11,7 +11,7 @@ import json
 import pytest
 import torch
 
-from modelcore import AdapterSpec, ComponentSpec, ModelConfig
+from modelcore import AdapterSpec, ComponentSpec, ModelConfig, ModelManager
 from modelcore.config.spec import FORMAT, FORMAT_V1, FORMAT_V2, SUPPORTED_FORMATS, TEMPLATES
 from modelcore.config.upgrade import upgrade_v1_to_v2, upgrade_v2_to_v3
 from modelcore.tests.conftest import FLAVORS, build
@@ -55,7 +55,7 @@ def test_meta_and_tokenizer_are_carried_never_interpreted(manager, config):
 # comments
 
 def _commented():
-    config = FLAVORS["gpt_lora"]()
+    config = FLAVORS["nanogpt_lora"]()
     config.comments = {"_comment": "top level", "_why": "a test"}
     config.shared["rope"].comments = {"_note": "on a shared component"}
     config.input.comments = {"_note": "on the embedding"}
@@ -97,7 +97,7 @@ def test_a_comment_can_never_reach_a_constructor_or_fail_validation(manager):
 def test_an_unknown_non_comment_key_in_a_spec_is_still_an_error(manager):
     """...whereas a *mistyped parameter* stays an error -- that distinction is what the `_` prefix
     buys."""
-    config = FLAVORS["gpt"]()
+    config = FLAVORS["nanogpt"]()
     config.body.params["blocks"][0].params["comment"] = "missing its underscore"
     report = manager.validate_config(config)
     assert not report.ok
@@ -140,7 +140,7 @@ def test_v3_dict_missing_a_required_key_is_rejected(config, missing):
 
 
 def test_adapter_must_state_enabled():
-    d = FLAVORS["gpt_lora"]().to_dict()
+    d = FLAVORS["nanogpt_lora"]().to_dict()
     del d["adapters"][0]["enabled"]
     with pytest.raises(KeyError):
         ModelConfig.from_dict(d)
@@ -155,7 +155,7 @@ def _validation_messages(manager, config):
 
 
 def test_block_without_ffn_is_rejected(manager):
-    for flavor in ("gpt", "llama"):
+    for flavor in ("nanogpt", "plain"):
         config = FLAVORS[flavor]()
         del config.body.params["blocks"][0].params["ffn"]
         report, messages = _validation_messages(manager, config)
@@ -165,7 +165,7 @@ def test_block_without_ffn_is_rejected(manager):
 
 
 def test_config_without_shared_norm_is_rejected(manager):
-    config = FLAVORS["gpt"]()
+    config = FLAVORS["nanogpt"]()
     del config.shared["norm"]
     report, messages = _validation_messages(manager, config)
     assert not report.ok and "needs 'norm'" in messages
@@ -191,17 +191,17 @@ def _target(config, where):
 
 
 @pytest.mark.parametrize("flavor,where,param", [
-    ("gpt", "output", "softcap"),
-    ("gpt", "input", "smear"),
-    ("gpt", "rope", "over_compute"),
-    ("gpt", "backout", "backout_lambda_init"),
-    ("llama", "mixer0", "kv_slot"),
-    ("llama", "mixer0", "produces_kv"),
-    ("gpt", "mixer0", "head_dim"),
-    ("llama", "mixer0", "head_dim"),
-    ("llama", "mixer0", "features"),
-    ("llama", "block0", "features"),
-    ("llama", "body", "features"),
+    ("nanogpt", "output", "softcap"),
+    ("nanogpt", "input", "smear"),
+    ("nanogpt", "rope", "over_compute"),
+    ("nanogpt", "backout", "backout_lambda_init"),
+    ("plain", "mixer0", "kv_slot"),
+    ("plain", "mixer0", "produces_kv"),
+    ("nanogpt", "mixer0", "head_dim"),
+    ("plain", "mixer0", "head_dim"),
+    ("plain", "mixer0", "features"),
+    ("plain", "block0", "features"),
+    ("plain", "body", "features"),
 ])
 def test_formerly_defaulted_params_are_now_required(manager, flavor, where, param):
     config = FLAVORS[flavor]()
@@ -211,7 +211,7 @@ def test_formerly_defaulted_params_are_now_required(manager, flavor, where, para
 
 
 def test_template_must_be_a_supported_one(manager):
-    config = FLAVORS["gpt"]()
+    config = FLAVORS["nanogpt"]()
     for ok in TEMPLATES:
         config.template = ok
         assert manager.validate_config(config).ok
@@ -221,21 +221,21 @@ def test_template_must_be_a_supported_one(manager):
 
 
 def test_mlp_spec_is_validated(manager):
-    config = FLAVORS["gpt"]()
+    config = FLAVORS["nanogpt"]()
     mlp = config.body.params["blocks"][0].params["ffn"]
     mlp.params["activation"] = "swish"
     mlp.params["hidden_dim"] = 0
     report, messages = _validation_messages(manager, config)
     assert not report.ok and "activation must be one of" in messages and "hidden_dim must be a positive" in messages
     # a gated mlp does not take relu2 (that is a plain-mlp activation)
-    config = FLAVORS["llama"]()
+    config = FLAVORS["plain"]()
     config.body.params["blocks"][0].params["ffn"].params["activation"] = "relu2"
     report, _ = _validation_messages(manager, config)
     assert not report.ok
 
 
 def test_layer_norm_eps_must_be_a_number_but_rms_norm_may_be_null(manager):
-    config = FLAVORS["gpt"]()
+    config = FLAVORS["nanogpt"]()
     assert config.shared["norm"].params == {"eps": None}
     assert manager.validate_config(config).ok
     config.shared["norm"] = ComponentSpec("layer_norm", {"eps": None})
@@ -246,7 +246,7 @@ def test_layer_norm_eps_must_be_a_number_but_rms_norm_may_be_null(manager):
 # the mlp / norm choices actually reach the model
 
 def test_nested_mlp_spec_params_reach_the_module(manager):
-    config = FLAVORS["gpt_gated_mlp"]()
+    config = FLAVORS["nanogpt_gated_mlp"]()
     model = build(manager, config)
     mlp = model.body.blocks[0].ffn
     assert type(mlp).__name__ == "GatedMLP" and mlp.hidden_dim == 100
@@ -254,8 +254,8 @@ def test_nested_mlp_spec_params_reach_the_module(manager):
 
 
 def test_different_ffn_choices_give_different_models(manager):
-    a = build(manager, FLAVORS["gpt"]())
-    b = build(manager, FLAVORS["gpt_gated_mlp"]())
+    a = build(manager, FLAVORS["nanogpt"]())
+    b = build(manager, FLAVORS["nanogpt_gated_mlp"]())
     assert sum(p.numel() for p in a.parameters()) != sum(p.numel() for p in b.parameters())
 
 
@@ -351,7 +351,7 @@ def test_upgrade_materializes_what_v1_hardcoded():
     assert (plain["kv_slot"], plain["produces_kv"]) == (None, True)
     assert d["input"]["smear"] is True and d["output"]["softcap"] == 15
     # v1 had no head_dim concept -- every block derived it as n_embd // n_head; null is the v2
-    # spelling of "derive it" (see CausalSelfAttention), so both blocks upgrade to null, not to
+    # spelling of "derive it" (see Attention), so both blocks upgrade to null, not to
     # some computed number.
     assert gpt["head_dim"] is None and plain["head_dim"] is None
 
@@ -402,7 +402,7 @@ def test_upgrade_walks_nested_composers():
 def test_a_v1_config_still_builds_the_same_model_as_the_v2_one(manager):
     """The converter's materialized values must reproduce what v1 hardcoded: same parameters,
     same shapes, and -- given the same weights -- the same logits."""
-    for name in ("gpt", "llama", "llama_kvshare", "llama_kvshare_win"):
+    for name in ("nanogpt", "plain", "plain_kvshare", "plain_kvshare_win"):
         v3 = FLAVORS[name]()
         upgraded = ModelConfig.from_dict(_as_v1(v3.to_dict()))
         a, b = build(manager, v3), build(manager, upgraded)
@@ -411,3 +411,18 @@ def test_a_v1_config_still_builds_the_same_model_as_the_v2_one(manager):
         idx = torch.randint(0, v3.vocab_size, (2, 8))
         with torch.no_grad():
             assert torch.equal(a(idx), b(idx)), name
+
+
+def test_the_former_template_name_nanochat_loads_as_chat_tools():
+    d = FLAVORS["nanogpt"]().to_dict()
+    d["template"] = "nanochat"
+    config = ModelConfig.from_dict(d)
+    assert config.template == "chat_tools" and config.to_dict()["template"] == "chat_tools"
+    assert ModelManager().validate_config(config).ok
+
+
+def test_unknown_template_is_rejected_with_the_current_names():
+    d = FLAVORS["nanogpt"]().to_dict()
+    d["template"] = "bogus"
+    report = ModelManager().validate_config(ModelConfig.from_dict(d))
+    assert not report.ok and "chat_tools" in str(report)

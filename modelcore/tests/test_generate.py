@@ -68,7 +68,7 @@ def test_decoder_matches_generate_naive_at_temperature_zero(manager):
 
 
 def test_decoder_logits_shape_and_step_updates_them(manager):
-    config = FLAVORS["gpt"]()
+    config = FLAVORS["nanogpt"]()
     model = build(manager, config)
     model.eval()
     prompt = [1, 2, 3]
@@ -164,7 +164,7 @@ def test_collect_batch_drops_terminal_and_stops_when_all_rows_complete():
 
 
 def test_generate_with_tools_respects_max_tokens_with_no_tools(manager):
-    config = FLAVORS["gpt"]()
+    config = FLAVORS["nanogpt"]()
     model = build(manager, config)
     model.eval()
     prompt = [1, 2, 3]
@@ -235,7 +235,7 @@ def test_multi_prompt_decode_matches_each_prompt_alone_at_temperature_zero(manag
 
 
 def test_one_prompt_through_the_multi_form_equals_the_single_form(manager):
-    model = _build_awake(manager, FLAVORS["gpt"]())
+    model = _build_awake(manager, FLAVORS["nanogpt"]())
     model.eval()
     prompt = RAGGED_PROMPTS[1]
     single, single_masks = _alone(manager, model, prompt, num_samples=2)
@@ -244,7 +244,7 @@ def test_one_prompt_through_the_multi_form_equals_the_single_form(manager):
 
 
 def test_multi_prompt_rows_are_prompt_major(manager):
-    model = _build_awake(manager, FLAVORS["llama"]())
+    model = _build_awake(manager, FLAVORS["plain"]())
     model.eval()
     prompts = [RAGGED_PROMPTS[0], RAGGED_PROMPTS[2]]
     results, _ = _together(manager, model, prompts, num_samples=3, max_tokens=5)
@@ -257,7 +257,7 @@ def test_multi_prompt_rows_are_prompt_major(manager):
 
 
 def test_multi_prompt_cache_is_ragged_and_each_row_advances_one_per_step(manager):
-    model = _build_awake(manager, FLAVORS["llama"]())
+    model = _build_awake(manager, FLAVORS["plain"]())
     model.eval()
     decoder = manager.new_decoder(model, RAGGED_PROMPTS, num_samples=1, max_tokens=6)
     lens = [len(p) for p in RAGGED_PROMPTS]
@@ -273,7 +273,7 @@ def test_a_finished_row_is_frozen_and_never_disturbs_the_others(manager, monkeyp
     """Pick a terminal id that prompt A greedily emits on its 3rd token. In a batch, A must stop
     after 2 tokens, B must decode all 12 exactly as it would alone, and the tool state machine
     must run for A only until it finished -- not for every remaining step of B."""
-    model = _build_awake(manager, FLAVORS["llama_kvshare_win"]())
+    model = _build_awake(manager, FLAVORS["plain_kvshare_win"]())
     model.eval()
     a, b = RAGGED_PROMPTS[0], RAGGED_PROMPTS[3]
     terminal = frozenset({_alone(manager, model, a, max_tokens=8)[0][0][len(a) + 2]})

@@ -11,7 +11,7 @@ import torch
 from modelcore import ComponentSpec, ModelManager
 from modelcore.catalog import register_component
 from modelcore.components.contracts import BaseFeature
-from modelcore.tests.conftest import FLAVORS, _gate, _gpt_like, _plain_like, build
+from modelcore.tests.conftest import FLAVORS, _gate, _nanogpt_like, _plain_like, build
 
 
 @register_component("test_scale")
@@ -90,8 +90,8 @@ def test_unknown_feature_type_is_reported(manager):
 
 
 def test_state_dict_keys_do_not_depend_on_feature_list_order(manager):
-    a = _gpt_like(attn_gate=_gate("head"))
-    b = _gpt_like(attn_gate=_gate("head"))
+    a = _nanogpt_like(attn_gate=_gate("head"))
+    b = _nanogpt_like(attn_gate=_gate("head"))
     for block in b.body.params["blocks"]:
         block.params["mixer"].params["features"].reverse()
     keys_a, keys_b = set(build(manager, a).state_dict()), set(build(manager, b).state_dict())

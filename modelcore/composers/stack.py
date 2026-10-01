@@ -11,7 +11,7 @@ class StackComposer(BaseComposer, FeatureHost):
     """Sequential residual stack -- the one body class. Threads x0 (the post-embedding
     activations) and a fresh kv_bus dict through every block each forward pass (a producer layer
     writes its K/V into the bus, a consumer layer reads an earlier layer's out of it -- see
-    modelcore.components.attention.CausalSelfAttention); a block that doesn't use either is
+    modelcore.components.attention.Attention); a block that doesn't use either is
     unaffected. Stack-level tricks (backout) are features on the hook points below; `state` is a
     dict private to one forward pass, for a feature to remember something between hooks.
 

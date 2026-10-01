@@ -10,7 +10,7 @@ H, D, T_MAX, SLOTS = 2, 8, 24, 2
 
 
 def _cache(batch_size, seq_len=T_MAX):
-    return KVCache(batch_size=batch_size, num_heads=H, seq_len=seq_len, head_dim=D,
+    return KVCache(batch_size=batch_size, n_kv_head=H, seq_len=seq_len, head_dim=D,
                    num_kv_slots=SLOTS, device="cpu", dtype=torch.float32)
 
 

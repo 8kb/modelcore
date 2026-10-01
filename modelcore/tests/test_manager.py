@@ -75,7 +75,7 @@ def test_num_matmul_params_matches_manual_scan(manager, config):
 def test_llama_flavor_has_no_gpt_residual_topology_extras(manager):
     """Structural proof of the roadmap's "boring baseline" claim: llama's tree has no value
     embeddings, smear, or per-layer resid/x0 scalars -- unlike gpt, which has all four roles."""
-    llama_config = FLAVORS["llama"]()
+    llama_config = FLAVORS["plain"]()
     model = build(manager, llama_config)
     roles = collect_param_roles(model)
     assert "value_embedding" not in roles
@@ -83,7 +83,7 @@ def test_llama_flavor_has_no_gpt_residual_topology_extras(manager):
     assert "resid_scalar" not in roles
     assert "x0_scalar" not in roles
 
-    gpt_config = FLAVORS["gpt"]()
+    gpt_config = FLAVORS["nanogpt"]()
     gpt_model = build(manager, gpt_config)
     gpt_roles = collect_param_roles(gpt_model)
     assert "value_embedding" in gpt_roles
@@ -124,15 +124,15 @@ def test_layer_specs_and_kv_cache_spec_are_consistent(manager, config):
 def test_explicit_head_dim_decouples_attention_width_from_n_embd(manager):
     """n_head=8, head_dim=16 -> n_head*head_dim=128, double n_embd=64: c_q/c_k/c_v/c_proj size off
     the wider figure, not off n_embd, and stats/kv_cache_spec agree with the module's own shapes."""
-    from modelcore.tests.conftest import _gpt_like
-    wide = build(manager, _gpt_like(n_head=8, n_kv_head=8, head_dim=16, n_embd=64))
-    narrow = build(manager, _gpt_like(n_head=8, n_kv_head=8, head_dim=8, n_embd=64))  # derived value
+    from modelcore.tests.conftest import _nanogpt_like
+    wide = build(manager, _nanogpt_like(n_head=8, n_kv_head=8, head_dim=16, n_embd=64))
+    narrow = build(manager, _nanogpt_like(n_head=8, n_kv_head=8, head_dim=8, n_embd=64))  # derived value
     attn = wide.body.blocks[0].mixer
     assert attn.head_dim == 16
     assert attn.c_q.weight.shape == (8 * 16, 64)
     assert attn.c_proj.weight.shape == (64, 8 * 16)
-    stats_wide = manager.stats(_gpt_like(n_head=8, n_kv_head=8, head_dim=16, n_embd=64))
-    stats_narrow = manager.stats(_gpt_like(n_head=8, n_kv_head=8, head_dim=8, n_embd=64))
+    stats_wide = manager.stats(_nanogpt_like(n_head=8, n_kv_head=8, head_dim=16, n_embd=64))
+    stats_narrow = manager.stats(_nanogpt_like(n_head=8, n_kv_head=8, head_dim=8, n_embd=64))
     assert stats_wide.kv_cache_spec["head_dim"] == 16
     # More heads at a WIDER head_dim than n_embd // n_head genuinely costs more matmul params --
     # the whole point of decoupling: "more heads" is no longer free the way it was when head_dim
@@ -145,8 +145,8 @@ def test_rope_head_dim_mismatch_is_a_runtime_error_not_a_silent_wrong_broadcast(
     validate_config (see modelcore/AGENTS.md) -- documents what actually happens on a mismatch:
     validation passes, and the forward pass raises a shape error rather than silently broadcasting
     something wrong. Not a promise to keep this exact error type/message, just that it's loud."""
-    from modelcore.tests.conftest import _gpt_like
-    config = _gpt_like(n_head=4, n_kv_head=4, n_embd=64, head_dim=16)  # shared.rope.head_dim == 16
+    from modelcore.tests.conftest import _nanogpt_like
+    config = _nanogpt_like(n_head=4, n_kv_head=4, n_embd=64, head_dim=16)  # shared.rope.head_dim == 16
     for block in config.body.params["blocks"]:
         block.params["mixer"].params["head_dim"] = 8  # mismatched against shared.rope
     assert manager.validate_config(config).ok
@@ -158,9 +158,9 @@ def test_rope_head_dim_mismatch_is_a_runtime_error_not_a_silent_wrong_broadcast(
 def test_head_dim_none_is_bit_identical_to_the_old_derive_only_behavior(manager):
     """head_dim=None (the upgrade path's spelling for a v1 config) must build exactly the model
     n_embd // n_head always built before this param existed -- same shapes, same seeded weights."""
-    from modelcore.tests.conftest import _gpt_like
-    explicit = _gpt_like(n_head=4, n_kv_head=4, n_embd=64, head_dim=16)  # 64 // 4 == 16
-    derived = _gpt_like(n_head=4, n_kv_head=4, n_embd=64, head_dim=16)
+    from modelcore.tests.conftest import _nanogpt_like
+    explicit = _nanogpt_like(n_head=4, n_kv_head=4, n_embd=64, head_dim=16)  # 64 // 4 == 16
+    derived = _nanogpt_like(n_head=4, n_kv_head=4, n_embd=64, head_dim=16)
     for block in derived.body.params["blocks"]:
         block.params["mixer"].params["head_dim"] = None
     a = build(manager, explicit, seed=7)

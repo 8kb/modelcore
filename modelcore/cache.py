@@ -11,16 +11,16 @@ import torch
 
 
 class KVCache:
-    def __init__(self, batch_size, num_heads, seq_len, head_dim, num_kv_slots, device, dtype):
+    def __init__(self, batch_size, n_kv_head, seq_len, head_dim, num_kv_slots, device, dtype):
         self.batch_size = batch_size
         self.max_seq_len = seq_len
         self.n_slots = num_kv_slots
-        self.n_heads = num_heads
+        self.n_kv_head = n_kv_head
         self.head_dim = head_dim
         # Pre-allocate cache tensors: (n_slots, B, T, H, D). n_slots can be fewer than the
         # model's layer count when layers share a KV slot (cross-layer KV sharing).
-        self.k_cache = torch.zeros(num_kv_slots, batch_size, seq_len, num_heads, head_dim, device=device, dtype=dtype)
-        self.v_cache = torch.zeros(num_kv_slots, batch_size, seq_len, num_heads, head_dim, device=device, dtype=dtype)
+        self.k_cache = torch.zeros(num_kv_slots, batch_size, seq_len, n_kv_head, head_dim, device=device, dtype=dtype)
+        self.v_cache = torch.zeros(num_kv_slots, batch_size, seq_len, n_kv_head, head_dim, device=device, dtype=dtype)
         # Current sequence length per batch element (FA3 needs int32)
         self.cache_seqlens = torch.zeros(batch_size, dtype=torch.int32, device=device)
         # Host-side mirror of "are all rows at the same position?": the shared position, or None
@@ -78,7 +78,7 @@ class KVCache:
         Used when we do batch=1 prefill and then want to generate multiple samples in parallel.
         """
         assert self.get_pos() == 0, "Cannot prefill a non-empty KV cache"
-        assert self.n_slots == other.n_slots and self.n_heads == other.n_heads and self.head_dim == other.head_dim
+        assert self.n_slots == other.n_slots and self.n_kv_head == other.n_kv_head and self.head_dim == other.head_dim
         assert self.max_seq_len >= other.max_seq_len
         other_pos = other.get_pos()
         self.k_cache[:, :, :other_pos, :, :] = other.k_cache[:, :, :other_pos, :, :]
@@ -100,7 +100,7 @@ class KVCache:
         assert other.batch_size == 1, "prefill_row copies from a batch=1 cache"
         assert 0 <= row < self.batch_size, f"row {row} out of range for batch_size {self.batch_size}"
         assert self.cache_seqlens[row].item() == 0, "Cannot prefill a non-empty KV cache row"
-        assert self.n_slots == other.n_slots and self.n_heads == other.n_heads and self.head_dim == other.head_dim
+        assert self.n_slots == other.n_slots and self.n_kv_head == other.n_kv_head and self.head_dim == other.head_dim
         other_pos = other.get_pos()
         assert other_pos <= self.max_seq_len, f"prompt of {other_pos} tokens exceeds cache length {self.max_seq_len}"
         self.k_cache[:, row, :other_pos] = other.k_cache[:, 0, :other_pos]

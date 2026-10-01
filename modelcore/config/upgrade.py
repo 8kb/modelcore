@@ -41,7 +41,7 @@ def _upgrade_spec(spec: dict, n_embd: int, sequence_len: int) -> None:
     if kind in ("gpt_block", "plain_block"):
         spec.setdefault("mlp", _gpt_mlp(n_embd) if kind == "gpt_block" else _plain_mlp(n_embd))
         # v1 had no head_dim concept at all -- every block derived it as n_embd // n_head. null is
-        # the v2 spelling of "derive it" (see CausalSelfAttention), so this is a like-for-like
+        # the v2 spelling of "derive it" (see Attention), so this is a like-for-like
         # translation, not a new default value.
         spec.setdefault("head_dim", None)
         # Full attention was written window=sequence_len (the host preset layer's long window); it

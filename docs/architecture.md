@@ -113,7 +113,7 @@ class ModelConfig:
     vocab_size: int
     n_embd: int                    # the only truly global, uniform-across-layers value
     pad_vocab_size_to: int
-    template: str                  # how the model is talked to: "base" | "nanochat" (see below)
+    template: str                  # how the model is talked to: "base" | "chat_tools" (see below)
     reference: dict | None = None  # optional provenance: {"preset": name, "kwargs": {...}}
     shared: dict = {}              # name -> ComponentSpec, e.g. {"rope": ..., "norm": ...}
     input: ComponentSpec | None = None    # embedding
@@ -170,9 +170,10 @@ The `_` prefix is what makes the distinction explicit: a mistyped parameter (`"c
 
 ### `template`, `meta`, `tokenizer`
 
-- `template` (required; `"base"` or `"nanochat"`) says how the model is talked to: `base` is plain
-  completion, `nanochat` is the `<|user_start|>…` conversation format with Python tool calls
-  (`<|python_start|>…<|python_end|>`). It is **declarative only for now** — `validate_config` checks
+- `template` (required; `"base"` or `"chat_tools"`) says how the model is talked to: `base` is plain
+  completion, `chat_tools` is the `<|user_start|>…` conversation format with Python tool calls
+  (`<|python_start|>…<|python_end|>`). The former name `"nanochat"` is a documented load-time alias
+  (`TEMPLATE_ALIASES`): `from_dict` maps it, so older files keep loading and are re-saved with the new name. It is **declarative only for now** — `validate_config` checks
   it is one of `TEMPLATES` and nothing else reads it. Real validation (does the tokenizer carry the
   tokens the template needs?) is deliberately deferred.
 - `meta` is a free-form dict for provenance (name, description, dates). Never interpreted. Distinct
@@ -222,9 +223,15 @@ from another is a component in a slot or a **feature**:
   "features": [ {"#type": "resid_lambdas", "resid_lambda_init": 1.15, "x0_lambda_init": 0.2} ] }
 ```
 
-"gpt" and "llama" are just two feature sets on this class: gpt = `resid_lambdas` on the block plus
-`value_embed` on the attention (and `backout` on the stack); llama = no features; gated = an
-`output_gate` on the attention. `gpt_block`/`plain_block`/`gated_*_block` and the `backout` composer
+"nanogpt" and "plain" are just two feature sets on this class. **nanogpt** is the modified GPT of
+karpathy/nanochat (the family's reference architecture): `resid_lambdas` (per-layer residual and
+x0 mixing scalars) on the block, `value_embed` (a token-indexed value embedding, gated, on
+alternating layers) on the attention, `smear` on the input embedding (a cheap bigram-like mix of the
+previous token), `backout` on the stack (subtracts a mid-depth residual from the final one), a
+squared-ReLU FFN, and sliding-window "SSSL" attention. **plain** is a standard pre-norm stack:
+no features, a gated SiLU FFN. A gated variant of either adds an `output_gate` on the attention.
+These are host preset names, not modelcore concepts; the tree only ever contains the concrete
+components. `gpt_block`/`plain_block`/`gated_*_block` and the `backout` composer
 exist only as v2 names that `upgrade_v2_to_v3` rewrites — there is no class behind them. There is no
 new block type, now or later: a new token mixer (Mamba, convolutions) is a new **mixer**, a new
 trick is a new **feature**.
@@ -237,7 +244,7 @@ not every layer is attention, `layer_idx` is not a contiguous slot number, so su
 every `kv_slot` explicitly.
 
 **Feature** (`BaseFeature`): a registered component that declares `HOOKS`. A host (`Block`,
-`CausalSelfAttention`, `StackComposer`) declares the `HOOK_POINTS` it exposes and calls every
+`Attention`, `StackComposer`) declares the `HOOK_POINTS` it exposes and calls every
 feature at each of them (`FeatureHost`); every hook is `hook(value, *context) -> value`, so several
 features on one point chain in list order.
 
@@ -419,7 +426,7 @@ param (`softcap`, `smear`, `over_compute`, `backout_lambda_init`, `kv_slot`, `pr
 write those values in.
 
 This is the fix for the abstraction leak the whole design guards against: a component like
-`CausalSelfAttention` cannot have a method like `has_ve(layer_idx, n_layer)` (a policy about
+`Attention` cannot have a method like `has_ve(layer_idx, n_layer)` (a policy about
 *which* layers get a value embedding), because by the time `modelcore` ever sees a config, that
 decision is already made. Materializing it is the depth-dial layer's job, not core's.
 
@@ -548,7 +555,7 @@ class ModelStats:
     num_matmul_params: int
     layer_specs: list              # per block: AttentionLayerSpec | RecurrentLayerSpec | None
     kv_cache_spec: dict            # what modelcore.cache.KVCache needs to allocate
-    shape_summary: dict            # n_layer/n_embd/n_head/n_kv_head/sequence_len/window_pattern
+    shape_summary: dict            # n_layer/n_embd/n_head/n_kv_head/sequence_len/window
     flops_per_token: int
     has_sliding_window: bool
     state_elems_per_row: int       # recurrent mixers' + stateful features' cache elements per row
@@ -563,7 +570,7 @@ class ModelStats:
     def state_bytes_per_row(self): ...
 ```
 
-`shape_summary` reports a concrete value for `n_head`/`n_kv_head`/`window_pattern` when every
+`shape_summary` reports a concrete value for `n_head`/`n_kv_head`/`window` when every
 layer agrees, else the string `"mixed"` — one implementation for every tree, uniform or not,
 rather than a separate "flat config" code path. `params_by_role` is the generic role-keyed dict
 for *every* architecture — a host application wanting a different, legacy-shaped presentation

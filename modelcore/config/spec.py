@@ -23,9 +23,11 @@ FORMAT = "modelcore.v3"  # stamped by to_dict(); from_dict dispatches on it (see
 SUPPORTED_FORMATS = (FORMAT_V1, FORMAT_V2, FORMAT)
 COMMENT_PREFIX = "_"     # a key starting with this is a freeform comment, never a parameter
 # What ModelConfig.template may say about how a model is talked to. Declarative only for now:
-# "base" is plain completion; "nanochat" is the <|user_start|>... conversation format with
-# <|python_start|>...<|python_end|> Python tool calls.
-TEMPLATES = ("base", "nanochat")
+# "base" is plain completion; "chat_tools" is the <|user_start|>... conversation format with
+# <|python_start|>...<|python_end|> Python tool calls. "nanochat" is its former name: from_dict
+# maps it to "chat_tools", so configs and checkpoints written before the rename keep loading.
+TEMPLATES = ("base", "chat_tools")
+TEMPLATE_ALIASES = {"nanochat": "chat_tools"}
 
 
 def _split_comments(d: dict) -> tuple[dict, dict]:
@@ -283,7 +285,7 @@ class ModelConfig:
             raise ValueError(f"a {FORMAT} config is missing required key(s) {missing} -- v3 has no defaults")
         return cls(
             sequence_len=data["sequence_len"], vocab_size=data["vocab_size"], n_embd=data["n_embd"],
-            pad_vocab_size_to=data["pad_vocab_size_to"], template=data["template"],
+            pad_vocab_size_to=data["pad_vocab_size_to"], template=TEMPLATE_ALIASES.get(data["template"], data["template"]),
             reference=data.get("reference"),
             shared={k: ComponentSpec.from_dict(v) for k, v in data.get("shared", {}).items()},
             input=ComponentSpec.from_dict(data["input"]),

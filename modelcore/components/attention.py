@@ -10,7 +10,7 @@ from modelcore.runtime import DEFAULT_RUNTIME
 
 def _validate_attention(params, ctx):
     """Semantic checks for the attention mixer: n_embd/n_head/n_kv_head must be mutually
-    consistent (the same constraints CausalSelfAttention asserts at construction time -- reported
+    consistent (the same constraints Attention asserts at construction time -- reported
     here as validation errors instead of crashing the build), window must be a real window value,
     and its features must fit its geometry. head_dim=None (derive from n_embd // n_head) still
     requires that division to be exact; an explicit head_dim decouples the two, so it isn't checked
@@ -51,7 +51,7 @@ def _validate_attention(params, ctx):
 
 
 @register_component("attention", needs=("n_embd", "rope", "norm", "runtime"), validate=_validate_attention)
-class CausalSelfAttention(BaseMixer, FeatureHost):
+class Attention(BaseMixer, FeatureHost):
     """GQA + RoPE + QK-norm + FA3/SDPA sliding-window attention, as a Block's mixer. Owns its
     window and its layer_spec(); takes explicit dims rather than a config object.
 

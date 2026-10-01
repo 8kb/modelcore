@@ -23,7 +23,7 @@ class Block(BaseBlock, FeatureHost):
     Everything that used to distinguish one block type from another is a component in a slot:
     the token mixer (attention today; SSMs and convolutions as they arrive) and the FFN are nested
     specs, and every per-layer trick (the resid/x0 lambdas, ...) is a feature in `features`. So a
-    "gpt" block and a "llama" block are the same class with different feature sets. layer_idx is
+    "nanogpt" block and a "plain" block are the same class with different feature sets. layer_idx is
     handed to the mixer (see BaseMixer.bind_layer); the norm is the config's shared one
     (`shared.norm`).
 

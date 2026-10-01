@@ -21,12 +21,12 @@ from modelcore.tests.conftest import FLAVORS, build
 def _lora_config(r=4, alpha=8, freeze_base=True, targets=("body.blocks.0.mixer.c_proj",),
                   names=None, dora=False):
     # c_proj (not c_q/c_k/c_v) is the default target deliberately: modelcore zero-initializes
-    # every block's final residual projection (CausalSelfAttention.c_proj, MLP.c_proj) as an
+    # every block's final residual projection (Attention.c_proj, MLP.c_proj) as an
     # identity-like init trick, so a change to an *earlier* projection (e.g. c_q) has zero effect
     # on the block's output at init -- it gets multiplied through a zero c_proj.weight before ever
     # reaching the residual sum. A test that wants a trained adapter's effect to be *observable*
     # in the model's output needs a target whose own output isn't masked downstream.
-    config = FLAVORS["gpt"]()
+    config = FLAVORS["nanogpt"]()
     names = names or [f"t{i}" for i in range(len(targets))]
     config.adapters = [
         AdapterSpec(target=t, name=n, type="dora" if dora else "lora", params={"r": r, "alpha": alpha})
@@ -90,7 +90,7 @@ def test_fresh_lora_adapter_is_an_exact_forward_noop(manager):
     """B is zero-initialized, so a freshly-applied, untrained LoRA adapter must reproduce the
     un-adapted forward *exactly* (not just approximately): B=0 means lora_B's matmul output is
     exactly zero, added to y with no rounding."""
-    base_model = build(manager, FLAVORS["gpt"](), seed=0)
+    base_model = build(manager, FLAVORS["nanogpt"](), seed=0)
     idx = torch.randint(0, base_model.config.vocab_size, (2, 8))
     with torch.no_grad():
         base_out = base_model(idx)
@@ -105,7 +105,7 @@ def test_fresh_dora_adapter_is_an_approximate_forward_noop(manager):
     """DoRA's magnitude is initialized from the base weight's own row norms, so it's a no-op only
     up to the floating-point round trip of a norm-then-rescale (see modelcore/peft/deltas.py's
     DoRADelta docstring) -- allclose, not equal."""
-    base_model = build(manager, FLAVORS["gpt"](), seed=0)
+    base_model = build(manager, FLAVORS["nanogpt"](), seed=0)
     idx = torch.randint(0, base_model.config.vocab_size, (2, 8))
     with torch.no_grad():
         base_out = base_model(idx)
@@ -117,7 +117,7 @@ def test_fresh_dora_adapter_is_an_approximate_forward_noop(manager):
 
 
 def test_disabled_adapter_forward_equals_base_even_when_trained(manager):
-    base_model = build(manager, FLAVORS["gpt"](), seed=0)
+    base_model = build(manager, FLAVORS["nanogpt"](), seed=0)
     idx = torch.randint(0, base_model.config.vocab_size, (2, 8))
     with torch.no_grad():
         base_out = base_model(idx)
@@ -234,7 +234,7 @@ def test_adapters_disabled_context_manager_round_trips_state(manager):
 
 
 def test_adapters_disabled_is_a_noop_with_no_adapters(manager):
-    model = build(manager, FLAVORS["llama"]())
+    model = build(manager, FLAVORS["plain"]())
     with manager.adapters_disabled(model):
         idx = torch.randint(0, model.config.vocab_size, (2, 8))
         assert torch.isfinite(model(idx)).all()

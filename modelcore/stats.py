@@ -108,7 +108,7 @@ def kv_read_bytes(layer_specs, dtype_itemsize, context_len) -> int:
 
 
 def kv_cache_spec(layer_specs) -> dict:
-    """What modelcore.cache.KVCache needs to allocate: num_kv_slots, num_heads, head_dim.
+    """What modelcore.cache.KVCache needs to allocate: num_kv_slots, n_kv_head, head_dim.
     num_kv_slots is the number of *distinct* KV caches, which can be fewer than len(layer_specs)
     when layers share a slot (see AttentionLayerSpec.kv_slot). Requires uniform n_kv_head/head_dim
     across layers -- a genuinely heterogeneous-KV architecture would need KVCache itself
@@ -118,7 +118,7 @@ def kv_cache_spec(layer_specs) -> dict:
     assert layer_specs, "layer_specs is empty"
     attn = _attention(layer_specs)
     if not attn:
-        return {"num_heads": 0, "head_dim": 0, "num_kv_slots": 0}
+        return {"n_kv_head": 0, "head_dim": 0, "num_kv_slots": 0}
     n_kv_heads = {s.n_kv_head for _, s in attn}
     head_dims = {s.head_dim for _, s in attn}
     assert len(n_kv_heads) == 1 and len(head_dims) == 1, (
@@ -128,7 +128,7 @@ def kv_cache_spec(layer_specs) -> dict:
     assert slots == set(range(len(slots))), (
         "kv_cache_spec() requires kv slots to be a contiguous 0..M-1 range"
     )
-    return {"num_heads": attn[0][1].n_kv_head, "head_dim": attn[0][1].head_dim, "num_kv_slots": len(slots)}
+    return {"n_kv_head": attn[0][1].n_kv_head, "head_dim": attn[0][1].head_dim, "num_kv_slots": len(slots)}
 
 
 def feature_costs(model) -> tuple[int, int]:
@@ -154,7 +154,7 @@ def recurrent_state_elems(layer_specs, feature_state_elems=0) -> int:
 
 
 def shape_summary(config, layer_specs) -> dict:
-    """n_layer/n_embd/n_head/n_kv_head/sequence_len/window_pattern, reporting "mixed" wherever
+    """n_layer/n_embd/n_head/n_kv_head/sequence_len/window, reporting "mixed" wherever
     layers disagree -- a materialized tree's per-layer choices can vary by construction, so this
     is the one implementation every config gets (a uniform tree just degenerates to a single
     value everywhere, rather than needing a separate "flat config" code path)."""
@@ -167,7 +167,7 @@ def shape_summary(config, layer_specs) -> dict:
         "n_layer": config.n_layer, "n_embd": config.n_embd,
         "n_head": one(n_heads), "n_kv_head": one(n_kv_heads),
         "sequence_len": config.sequence_len,
-        "window_pattern": one(windows),
+        "window": one(windows),
     }
 
 

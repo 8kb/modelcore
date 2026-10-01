@@ -96,7 +96,7 @@ modelcore/
   training length into the architecture. The v1→v2 upgrader rewrites `window >= sequence_len` to
   `-1`; a host preset layer must emit `-1` in the first place.
 - **There is one block class, and a new trick is never a new block type.** `Block` is `mixer` +
-  `ffn` + `features`; "gpt"/"llama"/"gated" are feature sets on it. A new token mixer (Mamba,
+  `ffn` + `features`; "nanogpt"/"plain"/"gated" are feature sets on it. A new token mixer (Mamba,
   convolution) is a `BaseMixer` in the `mixer` slot; anything else is a `BaseFeature` in a
   `features` list, declaring `HOOKS` that the host's `HOOK_POINTS` must cover (validation checks
   it, and rejects a duplicate type). A new hook point is a code change on the host, never a format
@@ -152,7 +152,7 @@ modelcore/
   error and indistinguishable from a mistyped param. Conversely an unknown top-level key without
   the `_` is an error (`ModelConfig.from_dict`), never silently dropped.
 - **`template`, `meta`, `tokenizer` are declarative/opaque.** `template` (`"base"`/`"chat_tools"`; the old
-  spelling `"nanochat"` is accepted as a load-time alias) is
+  spelling `"nanochat"` is accepted as a load-time alias (`TEMPLATE_ALIASES`)) is
   validated against `TEMPLATES` and read by nothing yet; `meta` and `tokenizer` are carried, never
   interpreted or cross-checked — modelcore knows nothing about tokenizers, so a host reconciles
   `tokenizer` against `vocab_size` itself.
